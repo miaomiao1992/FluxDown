@@ -61,7 +61,7 @@ class Sidebar extends StatelessWidget {
   Widget _buildLogo(AppColors c) {
     return DragToMoveArea(
       child: Container(
-        height: 42,
+        height: 48,
         padding: const EdgeInsets.symmetric(horizontal: 16),
         alignment: Alignment.centerLeft,
         child: Row(

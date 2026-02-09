@@ -24,10 +24,10 @@ class TaskTabBar extends StatelessWidget {
         final ctrl = controller;
         final selected = ctrl.statusTab;
         return Container(
-          height: 38,
+          height: 40,
           padding: const EdgeInsets.symmetric(horizontal: 16),
           decoration: BoxDecoration(
-            color: c.bg,
+            color: Colors.white,
             border: Border(bottom: BorderSide(color: c.border, width: 1)),
           ),
           child: Row(
@@ -38,7 +38,7 @@ class TaskTabBar extends StatelessWidget {
                   isSelected: selected == tab,
                   onTap: () => ctrl.setStatusTab(tab),
                 ),
-                const SizedBox(width: 4),
+                const SizedBox(width: 6),
               ],
             ],
           ),
@@ -78,7 +78,7 @@ class _TabState extends State<_Tab> {
       child: GestureDetector(
         onTap: widget.onTap,
         child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 4),
+          padding: const EdgeInsets.symmetric(horizontal: 10),
           decoration: BoxDecoration(
             border: Border(
               bottom: BorderSide(

@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import '../models/download_controller.dart';
 import '../models/settings_provider.dart';
+import '../services/log_service.dart';
+import '../services/notification_service.dart';
 import '../theme/app_colors.dart';
 import '../widgets/sidebar.dart';
 import '../widgets/header_bar.dart';
@@ -43,15 +45,22 @@ class _HomePageState extends State<HomePage> {
   @override
   void initState() {
     super.initState();
+    logInfo('HomePage', 'initState');
     // 请求 Rust 端加载下载配置
     _settingsProvider.requestConfig();
+    // 监听下载完成事件 → 发送系统通知
+    _controller.onTaskCompleted =
+        NotificationService.instance.showDownloadComplete;
   }
 
   @override
   void dispose() {
+    logInfo('HomePage', 'dispose');
+    _controller.onTaskCompleted = null;
     _controller.dispose();
     _settingsProvider.dispose();
     super.dispose();
+    logInfo('HomePage', 'dispose done');
   }
 
   void _openDetail() {
@@ -89,7 +98,7 @@ class _HomePageState extends State<HomePage> {
             top: 0,
             left: 0,
             right: 0,
-            height: 42,
+            height: 48,
             child: TitleDragArea(child: ColoredBox(color: c.surface1)),
           ),
           ColoredBox(
@@ -135,7 +144,7 @@ class _HomePageState extends State<HomePage> {
               top: 0,
               left: 0,
               right: 0,
-              height: 42,
+              height: 48,
               child: TitleDragArea(child: ColoredBox(color: c.surface1)),
             ),
             // 主布局

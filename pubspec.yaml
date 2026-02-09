@@ -45,6 +45,7 @@ dependencies:
   launch_at_startup: ^0.5.1
   path: ^1.9.0
   desktop_multi_window: ^0.3.0
+  ffi: ^2.1.5
 
 dev_dependencies:
   flutter_test:

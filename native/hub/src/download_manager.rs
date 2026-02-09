@@ -714,6 +714,14 @@ pub async fn progress_reporter(mut rx: mpsc::Receiver<ProgressUpdate>, db: Db) {
             }
         }
 
+        // When a task completes, persist final downloaded_bytes to DB so that
+        // subsequent app restarts load the correct 100% progress value.
+        if update.status == 3 && update.total_bytes > 0 {
+            let _ = db
+                .update_task_progress(&update.task_id, update.total_bytes)
+                .await;
+        }
+
         // Clean up finished tasks.
         if update.status == 3 || update.status == 4 {
             states.remove(&update.task_id);

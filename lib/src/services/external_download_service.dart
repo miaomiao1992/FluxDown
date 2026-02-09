@@ -8,6 +8,9 @@ import 'package:rinf/rinf.dart';
 import '../bindings/bindings.dart';
 import '../models/settings_provider.dart';
 import '../theme/theme_provider.dart';
+import 'log_service.dart';
+
+const _tag = 'ExtDownSvc';
 
 /// 监听来自浏览器扩展的外部下载请求，弹出独立的快速下载确认窗口。
 ///
@@ -24,6 +27,7 @@ class ExternalDownloadService {
   final SettingsProvider settingsProvider;
   final ThemeProvider themeProvider;
   StreamSubscription<RustSignalPack<ExternalDownloadRequest>>? _sub;
+  StreamSubscription<dynamic>? _windowChangeSub;
   bool _windowOpen = false;
 
   ExternalDownloadService._({
@@ -36,6 +40,7 @@ class ExternalDownloadService {
     required SettingsProvider settingsProvider,
     required ThemeProvider themeProvider,
   }) {
+    logInfo(_tag, 'init');
     _instance?._teardown();
     _instance = ExternalDownloadService._(
       settingsProvider: settingsProvider,
@@ -46,12 +51,16 @@ class ExternalDownloadService {
   }
 
   static void shutdown() {
+    logInfo(_tag, 'shutdown');
     _instance?._teardown();
     _instance = null;
   }
 
   void _teardown() {
+    logInfo(_tag, '_teardown');
     _sub?.cancel();
+    _windowChangeSub?.cancel();
+    _windowChangeSub = null;
   }
 
   void _startListening() {
@@ -64,15 +73,15 @@ class ExternalDownloadService {
     WindowController.fromCurrentEngine()
         .then((controller) {
           controller.setWindowMethodHandler((call) async {
+            logInfo(_tag, 'received method: ${call.method}');
             if (call.method == 'confirm_download') {
               _onConfirmDownload(call.arguments as String);
             }
           });
+          logInfo(_tag, 'method handler registered');
         })
         .catchError((e) {
-          debugPrint(
-            '[ExternalDownloadService] failed to register method handler: $e',
-          );
+          logError(_tag, 'failed to register method handler', e);
         });
   }
 
@@ -85,8 +94,9 @@ class ExternalDownloadService {
       final fileName = data['fileName'] as String? ?? '';
       final segments = data['segments'] as int? ?? 0;
 
-      debugPrint(
-        '[ExternalDownloadService] confirmed download: url=$url, dir=$saveDir',
+      logInfo(
+        _tag,
+        'confirmed download: url=$url, dir=$saveDir, file=$fileName',
       );
 
       // 发送确认信号到 Rust
@@ -96,24 +106,22 @@ class ExternalDownloadService {
         fileName: fileName,
         segments: segments,
       ).sendSignalToRust();
-    } catch (e) {
-      debugPrint('[ExternalDownloadService] failed to parse confirm data: $e');
+    } catch (e, stack) {
+      logError(_tag, 'failed to parse confirm data', e, stack);
     }
     _windowOpen = false;
   }
 
   void _onRequest(RustSignalPack<ExternalDownloadRequest> pack) async {
     final req = pack.message;
-    debugPrint(
-      '[ExternalDownloadService] received request: url=${req.url}, '
-      'filename=${req.filename}, size=${req.fileSize}',
+    logInfo(
+      _tag,
+      'received request: url=${req.url}, filename=${req.filename}, size=${req.fileSize}',
     );
 
     // 防止重复弹窗
     if (_windowOpen) {
-      debugPrint(
-        '[ExternalDownloadService] window already open, ignoring request',
-      );
+      logInfo(_tag, 'window already open, ignoring request');
       return;
     }
 
@@ -130,6 +138,7 @@ class ExternalDownloadService {
               WidgetsBinding.instance.platformDispatcher.platformBrightness ==
                   Brightness.dark);
 
+      logInfo(_tag, 'creating quick download sub-window...');
       // 创建独立子窗口
       final windowController = await WindowController.create(
         WindowConfiguration(
@@ -146,19 +155,32 @@ class ExternalDownloadService {
           }),
         ),
       );
+      logInfo(_tag, 'sub-window created: id=${windowController.windowId}');
 
-      // 监听子窗口关闭以重置标志
-      onWindowsChanged.listen((_) async {
-        final windows = await WindowController.getAll();
-        final stillExists = windows.any(
-          (w) => w.windowId == windowController.windowId,
-        );
-        if (!stillExists) {
+      // 监听子窗口关闭以重置标志（取消之前的监听，避免泄漏）
+      _windowChangeSub?.cancel();
+      _windowChangeSub = onWindowsChanged.listen((_) async {
+        try {
+          final windows = await WindowController.getAll();
+          final stillExists = windows.any(
+            (w) => w.windowId == windowController.windowId,
+          );
+          if (!stillExists) {
+            logInfo(_tag, 'sub-window closed, resetting _windowOpen');
+            _windowOpen = false;
+            _windowChangeSub?.cancel();
+            _windowChangeSub = null;
+          }
+        } catch (e) {
+          // 窗口查询失败（如进程退出中），安全重置
+          logError(_tag, 'onWindowsChanged query error', e);
           _windowOpen = false;
+          _windowChangeSub?.cancel();
+          _windowChangeSub = null;
         }
       });
-    } catch (e) {
-      debugPrint('[ExternalDownloadService] failed to create sub-window: $e');
+    } catch (e, stack) {
+      logError(_tag, 'failed to create sub-window', e, stack);
       _windowOpen = false;
     }
   }

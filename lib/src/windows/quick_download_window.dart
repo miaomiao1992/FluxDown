@@ -4,12 +4,12 @@ import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:shadcn_ui/shadcn_ui.dart';
-import 'package:window_manager/window_manager.dart';
 
 import '../theme/app_colors.dart';
 import '../theme/app_theme.dart';
 import '../theme/theme_provider.dart';
 import '../widgets/title_drag_area.dart';
+import 'sub_window_utils.dart';
 
 /// 独立快速下载确认窗口 — 浏览器扩展拦截下载时弹出
 ///
@@ -48,17 +48,18 @@ class _QuickDownloadWindowState extends State<QuickDownloadWindow> {
     if (filename.isNotEmpty) {
       _renameController.text = filename;
     }
-    _initWindow();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _initWindow());
   }
 
-  Future<void> _initWindow() async {
-    await windowManager.setSize(const Size(520, 420));
-    await windowManager.setMinimumSize(const Size(400, 300));
-    await windowManager.center();
-    await windowManager.setAlwaysOnTop(true);
-    await windowManager.setTitle('FluxDown - 新建下载');
-    await windowManager.show();
-    await windowManager.focus();
+  void _initWindow() {
+    SubWindowUtils.init();
+    SubWindowUtils.removeCaption();
+    SubWindowUtils.setSize(const Size(500, 400));
+    SubWindowUtils.center();
+    SubWindowUtils.setAlwaysOnTop(true);
+    SubWindowUtils.setTitle('FluxDown - 新建下载');
+    SubWindowUtils.show();
+    SubWindowUtils.focus();
   }
 
   @override
@@ -95,7 +96,6 @@ class _QuickDownloadWindowState extends State<QuickDownloadWindow> {
       _ => 0,
     };
 
-    // 将确认数据发回主窗口
     try {
       final mainController = WindowController.fromWindowId(mainWindowId);
       await mainController.invokeMethod(
@@ -111,11 +111,11 @@ class _QuickDownloadWindowState extends State<QuickDownloadWindow> {
       debugPrint('[QuickDownloadWindow] invokeMethod error: $e');
     }
 
-    await windowManager.close();
+    SubWindowUtils.close();
   }
 
-  Future<void> _cancel() async {
-    await windowManager.close();
+  void _cancel() {
+    SubWindowUtils.close();
   }
 
   String _formatFileSize(int bytes) {
@@ -143,7 +143,7 @@ class _QuickDownloadWindowState extends State<QuickDownloadWindow> {
           // ===== 内容区域 =====
           Expanded(
             child: Padding(
-              padding: const EdgeInsets.fromLTRB(20, 4, 20, 16),
+              padding: const EdgeInsets.fromLTRB(24, 0, 24, 20),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
@@ -153,69 +153,59 @@ class _QuickDownloadWindowState extends State<QuickDownloadWindow> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
-                          // 标题行
+                          const SizedBox(height: 16),
+                          // 标题行 + 文件信息标签
                           Row(
                             children: [
-                              Icon(
-                                LucideIcons.download,
-                                size: 20,
-                                color: c.accent,
-                              ),
-                              const SizedBox(width: 8),
-                              Text(
-                                '新建下载',
-                                style: TextStyle(
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.w600,
-                                  color: c.textPrimary,
+                              Container(
+                                width: 32,
+                                height: 32,
+                                decoration: BoxDecoration(
+                                  color: c.accent.withValues(alpha: 0.1),
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: Icon(
+                                  LucideIcons.download,
+                                  size: 16,
+                                  color: c.accent,
                                 ),
                               ),
-                              const Spacer(),
-                              if (fileSize > 0)
-                                Container(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 8,
-                                    vertical: 3,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    color: c.surface2,
-                                    borderRadius: BorderRadius.circular(4),
-                                  ),
-                                  child: Text(
-                                    _formatFileSize(fileSize),
+                              const SizedBox(width: 10),
+                              Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    '新建下载',
                                     style: TextStyle(
-                                      fontSize: 11,
-                                      color: c.textSecondary,
+                                      fontSize: 15,
+                                      fontWeight: FontWeight.w600,
+                                      color: c.textPrimary,
                                     ),
                                   ),
-                                ),
-                              if (mimeType.isNotEmpty) ...[
-                                const SizedBox(width: 6),
-                                Container(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 8,
-                                    vertical: 3,
+                                  const SizedBox(height: 2),
+                                  Row(
+                                    children: [
+                                      if (fileSize > 0)
+                                        _InfoTag(
+                                          text: _formatFileSize(fileSize),
+                                          c: c,
+                                        ),
+                                      if (fileSize > 0 && mimeType.isNotEmpty)
+                                        const SizedBox(width: 6),
+                                      if (mimeType.isNotEmpty)
+                                        _InfoTag(text: mimeType, c: c),
+                                    ],
                                   ),
-                                  decoration: BoxDecoration(
-                                    color: c.surface2,
-                                    borderRadius: BorderRadius.circular(4),
-                                  ),
-                                  child: Text(
-                                    mimeType,
-                                    style: TextStyle(
-                                      fontSize: 11,
-                                      color: c.textSecondary,
-                                    ),
-                                  ),
-                                ),
-                              ],
+                                ],
+                              ),
                             ],
                           ),
-                          const SizedBox(height: 16),
+
+                          const SizedBox(height: 18),
 
                           // URL 显示
-                          _label('下载链接', c),
-                          const SizedBox(height: 4),
+                          _SectionLabel(text: '下载链接', c: c),
+                          const SizedBox(height: 6),
                           Container(
                             padding: const EdgeInsets.symmetric(
                               horizontal: 12,
@@ -223,8 +213,10 @@ class _QuickDownloadWindowState extends State<QuickDownloadWindow> {
                             ),
                             decoration: BoxDecoration(
                               color: c.surface2,
-                              borderRadius: BorderRadius.circular(6),
-                              border: Border.all(color: c.border),
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(
+                                color: c.border.withValues(alpha: 0.6),
+                              ),
                             ),
                             child: SelectableText(
                               url,
@@ -232,43 +224,55 @@ class _QuickDownloadWindowState extends State<QuickDownloadWindow> {
                                 fontSize: 12,
                                 color: c.textSecondary,
                                 fontFamily: 'monospace',
+                                height: 1.5,
                               ),
                               maxLines: 2,
                             ),
                           ),
 
-                          const SizedBox(height: 14),
+                          const SizedBox(height: 16),
 
                           // 保存目录 + 线程数
                           Row(
+                            crossAxisAlignment: CrossAxisAlignment.end,
                             children: [
                               Expanded(
                                 child: Column(
                                   crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
-                                    _label('保存目录', c),
-                                    const SizedBox(height: 4),
+                                    _SectionLabel(text: '保存目录', c: c),
+                                    const SizedBox(height: 6),
                                     GestureDetector(
                                       onTap: _pickSaveDir,
                                       child: AbsorbPointer(
                                         child: ShadInput(
                                           controller: _saveDirController,
-                                          placeholder: const Text('保存目录'),
+                                          placeholder: const Text('选择保存目录'),
                                           readOnly: true,
+                                          trailing: Padding(
+                                            padding: const EdgeInsets.only(
+                                              right: 4,
+                                            ),
+                                            child: Icon(
+                                              LucideIcons.folderOpen,
+                                              size: 14,
+                                              color: c.textMuted,
+                                            ),
+                                          ),
                                         ),
                                       ),
                                     ),
                                   ],
                                 ),
                               ),
-                              const SizedBox(width: 10),
+                              const SizedBox(width: 12),
                               SizedBox(
                                 width: 100,
                                 child: Column(
                                   crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
-                                    _label('线程数', c),
-                                    const SizedBox(height: 4),
+                                    _SectionLabel(text: '线程数', c: c),
+                                    const SizedBox(height: 6),
                                     ShadSelect<String>(
                                       placeholder: const Text('自动'),
                                       options:
@@ -291,11 +295,11 @@ class _QuickDownloadWindowState extends State<QuickDownloadWindow> {
                             ],
                           ),
 
-                          const SizedBox(height: 14),
+                          const SizedBox(height: 16),
 
                           // 文件名
-                          _label('文件名（留空自动识别）', c),
-                          const SizedBox(height: 4),
+                          _SectionLabel(text: '文件名（留空自动识别）', c: c),
+                          const SizedBox(height: 6),
                           ShadInput(
                             controller: _renameController,
                             placeholder: const Text('自动识别文件名'),
@@ -317,7 +321,21 @@ class _QuickDownloadWindowState extends State<QuickDownloadWindow> {
                       const SizedBox(width: 8),
                       ShadButton(
                         onPressed: _startDownload,
-                        child: const Text('开始下载'),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(
+                              LucideIcons.download,
+                              size: 14,
+                              color: Colors.white,
+                            ),
+                            const SizedBox(width: 6),
+                            const Text(
+                              '开始下载',
+                              style: TextStyle(color: Colors.white),
+                            ),
+                          ],
+                        ),
                       ),
                     ],
                   ),
@@ -329,12 +347,41 @@ class _QuickDownloadWindowState extends State<QuickDownloadWindow> {
       ),
     );
   }
+}
 
-  Widget _label(String text, AppColors c) {
+/// 信息标签（文件大小 / MIME 类型）
+class _InfoTag extends StatelessWidget {
+  final String text;
+  final AppColors c;
+
+  const _InfoTag({required this.text, required this.c});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: c.surface2,
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Text(text, style: TextStyle(fontSize: 10, color: c.textMuted)),
+    );
+  }
+}
+
+/// 表单分区标签
+class _SectionLabel extends StatelessWidget {
+  final String text;
+  final AppColors c;
+
+  const _SectionLabel({required this.text, required this.c});
+
+  @override
+  Widget build(BuildContext context) {
     return Text(
       text,
       style: TextStyle(
-        fontSize: 11,
+        fontSize: 11.5,
         fontWeight: FontWeight.w500,
         color: c.textSecondary,
       ),
@@ -342,7 +389,7 @@ class _QuickDownloadWindowState extends State<QuickDownloadWindow> {
   }
 }
 
-/// 子窗口自定义标题栏 — 拖拽移动 + 关闭按钮
+/// 子窗口自定义标题栏 — 拖拽移动 + 关闭按钮，精致设计
 class _TitleBar extends StatefulWidget {
   final AppColors c;
   final VoidCallback onClose;
@@ -369,7 +416,17 @@ class _TitleBarState extends State<_TitleBar> {
         ),
         child: Row(
           children: [
-            Icon(LucideIcons.download, size: 14, color: c.accent),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(4),
+              child: Image.asset(
+                'assets/logo/fluxdown_logo.png',
+                width: 16,
+                height: 16,
+                filterQuality: FilterQuality.medium,
+                errorBuilder: (_, __, _) =>
+                    Icon(LucideIcons.download, size: 14, color: c.accent),
+              ),
+            ),
             const SizedBox(width: 8),
             Text(
               'FluxDown',
@@ -377,6 +434,7 @@ class _TitleBarState extends State<_TitleBar> {
                 fontSize: 12,
                 fontWeight: FontWeight.w600,
                 color: c.textPrimary,
+                letterSpacing: 0.2,
               ),
             ),
             const Spacer(),
@@ -387,7 +445,7 @@ class _TitleBarState extends State<_TitleBar> {
               child: GestureDetector(
                 onTap: widget.onClose,
                 child: Container(
-                  width: 40,
+                  width: 42,
                   height: 36,
                   color: _isCloseHovered
                       ? AppColors.red.withValues(alpha: 0.9)
@@ -395,7 +453,7 @@ class _TitleBarState extends State<_TitleBar> {
                   child: Icon(
                     LucideIcons.x,
                     size: 14,
-                    color: _isCloseHovered ? Colors.white : c.textSecondary,
+                    color: _isCloseHovered ? Colors.white : c.textMuted,
                   ),
                 ),
               ),
@@ -420,7 +478,6 @@ class QuickDownloadApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // 从主窗口传来的主题配置
     final schemeName = args['colorScheme'] as String? ?? 'blue';
     final isDark = args['isDark'] as bool? ?? true;
 

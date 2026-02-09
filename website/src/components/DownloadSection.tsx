@@ -20,8 +20,8 @@ export default function DownloadSection() {
   ];
 
   return (
-    <section id="download" className="relative py-32 overflow-hidden bg-dark-bg">
-      <LampEffect className="min-h-[600px]">
+    <section id="download" className="relative pt-20 pb-32 overflow-hidden bg-dark-bg">
+      <LampEffect>
         <div className="mx-auto max-w-7xl px-6 lg:px-8 relative z-10">
           <motion.div
             className="text-center max-w-2xl mx-auto mb-16"
@@ -44,7 +44,7 @@ export default function DownloadSection() {
 
           {/* Platform cards */}
           <motion.div
-            className="grid grid-cols-1 sm:grid-cols-3 gap-5 max-w-3xl mx-auto mb-16"
+            className="grid grid-cols-1 sm:grid-cols-3 gap-5 max-w-4xl mx-auto mb-16"
             initial={{ opacity: 0, y: 30 }}
             whileInView={{ opacity: 1, y: 0 }}
             viewport={{ once: true }}
@@ -66,7 +66,7 @@ export default function DownloadSection() {
                   }`}
                 >
                   {p.primary && (
-                    <div className="absolute -top-2.5 left-1/2 -translate-x-1/2 px-3 py-0.5 rounded-full bg-brand-blue text-[10px] font-semibold text-white flex items-center gap-1">
+                    <div className="absolute -top-2.5 left-1/2 -translate-x-1/2 px-3 py-0.5 rounded-full bg-brand-blue text-[10px] font-semibold text-white flex items-center gap-1 whitespace-nowrap">
                       <Check className="w-3 h-3" />
                       {p.badge}
                     </div>

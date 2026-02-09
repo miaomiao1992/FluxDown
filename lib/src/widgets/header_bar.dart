@@ -3,6 +3,7 @@ import 'package:shadcn_ui/shadcn_ui.dart';
 import 'package:window_manager/window_manager.dart';
 import '../../main.dart';
 import '../models/download_controller.dart';
+import '../services/log_service.dart';
 import '../theme/app_colors.dart';
 import 'title_drag_area.dart';
 
@@ -16,10 +17,10 @@ class HeaderBar extends StatelessWidget {
     final c = AppColors.of(context);
     return TitleDragArea(
       child: Container(
-        height: 42,
+        height: 48,
         // right 预留 WindowControls 区域宽度：
-        // 4 工具按钮(36*4) + 分隔线(5) + 3 窗口按钮(36*3) = 257
-        padding: const EdgeInsets.only(left: 12, right: 257),
+        // 4 工具按钮(40*4) + 分隔线(9) + 3 窗口按钮(40*3) = 289
+        padding: const EdgeInsets.only(left: 16, right: 289),
         decoration: BoxDecoration(
           color: c.surface1,
           border: Border(bottom: BorderSide(color: c.border, width: 1)),
@@ -47,7 +48,7 @@ class HeaderBar extends StatelessWidget {
                 ],
               ),
             ),
-            const SizedBox(width: 10),
+            const SizedBox(width: 12),
             // Search
             Flexible(
               child: ConstrainedBox(
@@ -102,7 +103,7 @@ class WindowControls extends StatelessWidget {
     final c = AppColors.of(context);
     final themeProvider = FluxDownApp.of(context);
     return SizedBox(
-      height: 42,
+      height: 48,
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -111,21 +112,21 @@ class WindowControls extends StatelessWidget {
             icon: LucideIcons.circlePause,
             tooltip: '全部暂停',
             onPressed: () => controller.pauseAll(),
-            iconSize: 18,
+            iconSize: 16,
           ),
           // 全部恢复
           _ToolButton(
             icon: LucideIcons.circlePlay,
             tooltip: '全部恢复',
             onPressed: () => controller.resumeAll(),
-            iconSize: 18,
+            iconSize: 16,
           ),
           // 设置按钮
           _ToolButton(
             icon: LucideIcons.settings,
             tooltip: '设置',
             onPressed: () => onSettings?.call(),
-            iconSize: 18,
+            iconSize: 16,
             isActive: isSettingsActive,
           ),
           // 主题切换按钮
@@ -135,22 +136,27 @@ class WindowControls extends StatelessWidget {
                 : LucideIcons.moon,
             tooltip: themeProvider.isDark(context) ? '切换到亮色模式' : '切换到暗色模式',
             onPressed: () => themeProvider.toggleTheme(context),
-            iconSize: 16,
+            iconSize: 15,
           ),
           // 分隔线
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 2),
-            child: Container(width: 1, height: 20, color: c.border),
+            padding: const EdgeInsets.symmetric(horizontal: 4),
+            child: Container(width: 1, height: 16, color: c.border),
           ),
           // 窗口控制按钮
           _WindowButton(
             icon: LucideIcons.minus,
-            onPressed: () => windowManager.minimize(),
+            onPressed: () {
+              logInfo('WindowCtrl', 'minimize clicked');
+              windowManager.minimize();
+            },
             colors: c,
           ),
           _WindowButton(
             icon: LucideIcons.square,
+            iconSize: 12,
             onPressed: () async {
+              logInfo('WindowCtrl', 'maximize/restore clicked');
               if (await windowManager.isMaximized()) {
                 await windowManager.unmaximize();
               } else {
@@ -161,7 +167,10 @@ class WindowControls extends StatelessWidget {
           ),
           _WindowButton(
             icon: LucideIcons.x,
-            onPressed: () => windowManager.close(),
+            onPressed: () {
+              logInfo('WindowCtrl', 'close clicked');
+              windowManager.close();
+            },
             colors: c,
             isClose: true,
           ),
@@ -176,12 +185,14 @@ class _WindowButton extends StatefulWidget {
   final VoidCallback onPressed;
   final AppColors colors;
   final bool isClose;
+  final double iconSize;
 
   const _WindowButton({
     required this.icon,
     required this.onPressed,
     required this.colors,
     this.isClose = false,
+    this.iconSize = 14,
   });
 
   @override
@@ -199,9 +210,10 @@ class _WindowButtonState extends State<_WindowButton> {
       onExit: (_) => setState(() => _isHovered = false),
       child: GestureDetector(
         onTap: widget.onPressed,
-        child: Container(
-          width: 36,
-          height: 42,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          width: 40,
+          height: 48,
           color: _isHovered
               ? (widget.isClose
                     ? AppColors.red.withValues(alpha: 0.9)
@@ -209,7 +221,7 @@ class _WindowButtonState extends State<_WindowButton> {
               : Colors.transparent,
           child: Icon(
             widget.icon,
-            size: 14,
+            size: widget.iconSize,
             color: _isHovered && widget.isClose
                 ? Colors.white
                 : c.textSecondary,
@@ -231,7 +243,7 @@ class _ToolButton extends StatefulWidget {
   const _ToolButton({
     required this.icon,
     required this.onPressed,
-    this.iconSize = 18,
+    this.iconSize = 16,
     this.tooltip,
     this.isActive = false,
   });
@@ -252,14 +264,17 @@ class _ToolButtonState extends State<_ToolButton> {
       onExit: (_) => setState(() => _isHovered = false),
       child: GestureDetector(
         onTap: widget.onPressed,
-        child: Container(
-          width: 36,
-          height: 42,
-          color: isActive
-              ? c.accentBg
-              : _isHovered
-              ? c.surface3
-              : Colors.transparent,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          width: 40,
+          height: 48,
+          decoration: BoxDecoration(
+            color: isActive
+                ? c.accentBg
+                : _isHovered
+                ? c.surface3
+                : Colors.transparent,
+          ),
           child: Icon(
             widget.icon,
             size: widget.iconSize,

@@ -6,6 +6,7 @@ import 'package:launch_at_startup/launch_at_startup.dart';
 import 'package:rinf/rinf.dart';
 
 import '../bindings/bindings.dart';
+import '../services/log_service.dart';
 
 /// 下载引擎相关配置（持久化在 Rust SQLite 中）
 class SettingsProvider extends ChangeNotifier {
@@ -26,6 +27,7 @@ class SettingsProvider extends ChangeNotifier {
   StreamSubscription<RustSignalPack<ConfigLoaded>>? _configSub;
 
   SettingsProvider() {
+    logInfo('Settings', 'constructor, setting globalInstance');
     globalInstance = this;
     _startListening();
     _syncAutoStartupState();
@@ -33,6 +35,7 @@ class SettingsProvider extends ChangeNotifier {
 
   @override
   void dispose() {
+    logInfo('Settings', 'dispose');
     _configSub?.cancel();
     super.dispose();
   }
@@ -150,7 +153,9 @@ class SettingsProvider extends ChangeNotifier {
 
   void _onConfigLoaded(RustSignalPack<ConfigLoaded> pack) {
     final entries = pack.message.entries;
+    logInfo('Settings', '_onConfigLoaded: ${entries.length} entries');
     for (final entry in entries) {
+      logInfo('Settings', '  config: ${entry.key}=${entry.value}');
       switch (entry.key) {
         case 'default_save_dir':
           _defaultSaveDir = entry.value;

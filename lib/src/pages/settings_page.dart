@@ -7,7 +7,31 @@ import '../theme/app_colors.dart';
 import '../theme/theme_provider.dart';
 import '../widgets/title_drag_area.dart';
 
-class SettingsPage extends StatelessWidget {
+// ─────────────────────────────────────────────
+// 设置分类枚举
+// ─────────────────────────────────────────────
+
+enum _SettingsCategory {
+  general(icon: LucideIcons.settings2, label: '通用', desc: '基本行为设置'),
+  appearance(icon: LucideIcons.palette, label: '外观', desc: '主题与配色'),
+  download(icon: LucideIcons.download, label: '下载', desc: '下载引擎配置');
+
+  final IconData icon;
+  final String label;
+  final String desc;
+
+  const _SettingsCategory({
+    required this.icon,
+    required this.label,
+    required this.desc,
+  });
+}
+
+// ─────────────────────────────────────────────
+// 设置页面（带侧边栏导航）
+// ─────────────────────────────────────────────
+
+class SettingsPage extends StatefulWidget {
   final VoidCallback onBack;
   final SettingsProvider settingsProvider;
 
@@ -18,6 +42,13 @@ class SettingsPage extends StatelessWidget {
   });
 
   @override
+  State<SettingsPage> createState() => _SettingsPageState();
+}
+
+class _SettingsPageState extends State<SettingsPage> {
+  _SettingsCategory _selected = _SettingsCategory.general;
+
+  @override
   Widget build(BuildContext context) {
     final c = AppColors.of(context);
     return Column(
@@ -25,17 +56,16 @@ class SettingsPage extends StatelessWidget {
         // 顶部标题栏
         TitleDragArea(
           child: Container(
-            height: 42,
-            padding: const EdgeInsets.only(left: 12, right: 257),
+            height: 48,
+            padding: const EdgeInsets.only(left: 12, right: 289),
             decoration: BoxDecoration(
               color: c.surface1,
               border: Border(bottom: BorderSide(color: c.border, width: 1)),
             ),
             child: Row(
               children: [
-                // 返回按钮
                 ShadButton.ghost(
-                  onPressed: onBack,
+                  onPressed: widget.onBack,
                   size: ShadButtonSize.sm,
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
@@ -66,25 +96,26 @@ class SettingsPage extends StatelessWidget {
             ),
           ),
         ),
-        // 内容区域
+        // 主体：侧边栏 + 内容区
         Expanded(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 24),
-            child: Center(
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 640),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    _GeneralSection(settingsProvider: settingsProvider),
-                    const SizedBox(height: 32),
-                    const _AppearanceSection(),
-                    const SizedBox(height: 32),
-                    _DownloadSection(settingsProvider: settingsProvider),
-                  ],
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // 左侧导航栏
+              _SettingsSidebar(
+                selected: _selected,
+                onSelect: (cat) => setState(() => _selected = cat),
+              ),
+              // 分隔线
+              Container(width: 1, color: c.border),
+              // 右侧内容区
+              Expanded(
+                child: _SettingsContent(
+                  category: _selected,
+                  settingsProvider: widget.settingsProvider,
                 ),
               ),
-            ),
+            ],
           ),
         ),
       ],
@@ -93,47 +124,337 @@ class SettingsPage extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────
-// 通用设置区块
+// 设置侧边栏导航
 // ─────────────────────────────────────────────
 
-class _GeneralSection extends StatelessWidget {
-  final SettingsProvider settingsProvider;
+class _SettingsSidebar extends StatelessWidget {
+  final _SettingsCategory selected;
+  final ValueChanged<_SettingsCategory> onSelect;
 
-  const _GeneralSection({required this.settingsProvider});
+  const _SettingsSidebar({required this.selected, required this.onSelect});
 
   @override
   Widget build(BuildContext context) {
     final c = AppColors.of(context);
+    return Container(
+      width: 200,
+      color: c.surface1,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const SizedBox(height: 16),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+            child: Text(
+              '设置',
+              style: TextStyle(
+                fontSize: 10.5,
+                fontWeight: FontWeight.w500,
+                color: c.textMuted,
+                letterSpacing: 0.5,
+              ),
+            ),
+          ),
+          const SizedBox(height: 4),
+          for (final cat in _SettingsCategory.values)
+            _SettingsNavItem(
+              icon: cat.icon,
+              label: cat.label,
+              description: cat.desc,
+              isSelected: selected == cat,
+              onTap: () => onSelect(cat),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SettingsNavItem extends StatefulWidget {
+  final IconData icon;
+  final String label;
+  final String description;
+  final bool isSelected;
+  final VoidCallback onTap;
+
+  const _SettingsNavItem({
+    required this.icon,
+    required this.label,
+    required this.description,
+    required this.isSelected,
+    required this.onTap,
+  });
+
+  @override
+  State<_SettingsNavItem> createState() => _SettingsNavItemState();
+}
+
+class _SettingsNavItemState extends State<_SettingsNavItem> {
+  bool _isHovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = AppColors.of(context);
+    final selected = widget.isSelected;
+
+    return MouseRegion(
+      onEnter: (_) => setState(() => _isHovered = true),
+      onExit: (_) => setState(() => _isHovered = false),
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          decoration: BoxDecoration(
+            color: selected
+                ? c.accentBg
+                : _isHovered
+                ? c.hoverBg
+                : c.hoverBg.withValues(alpha: 0),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 32,
+                height: 32,
+                decoration: BoxDecoration(
+                  color: selected
+                      ? c.accent.withValues(alpha: 0.12)
+                      : c.surface2,
+                  borderRadius: BorderRadius.circular(7),
+                ),
+                child: Icon(
+                  widget.icon,
+                  size: 15,
+                  color: selected ? c.accent : c.textSecondary,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      widget.label,
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        color: selected ? c.accent : c.textPrimary,
+                        fontWeight: selected
+                            ? FontWeight.w600
+                            : FontWeight.w500,
+                      ),
+                    ),
+                    const SizedBox(height: 1),
+                    Text(
+                      widget.description,
+                      style: TextStyle(fontSize: 10.5, color: c.textMuted),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────
+// 设置内容区
+// ─────────────────────────────────────────────
+
+class _SettingsContent extends StatelessWidget {
+  final _SettingsCategory category;
+  final SettingsProvider settingsProvider;
+
+  const _SettingsContent({
+    required this.category,
+    required this.settingsProvider,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 28),
+      child: Align(
+        alignment: Alignment.topCenter,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 600),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _SectionHeader(category: category),
+              const SizedBox(height: 24),
+              AnimatedSwitcher(
+                duration: const Duration(milliseconds: 200),
+                layoutBuilder: (currentChild, previousChildren) {
+                  return Stack(
+                    alignment: Alignment.topCenter,
+                    children: [
+                      ...previousChildren,
+                      if (currentChild != null) currentChild,
+                    ],
+                  );
+                },
+                child: switch (category) {
+                  _SettingsCategory.general => _GeneralContent(
+                    key: const ValueKey('general'),
+                    settingsProvider: settingsProvider,
+                  ),
+                  _SettingsCategory.appearance => const _AppearanceContent(
+                    key: ValueKey('appearance'),
+                  ),
+                  _SettingsCategory.download => _DownloadContent(
+                    key: ValueKey('download'),
+                    settingsProvider: settingsProvider,
+                  ),
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────
+// 分类标题头
+// ─────────────────────────────────────────────
+
+class _SectionHeader extends StatelessWidget {
+  final _SettingsCategory category;
+
+  const _SectionHeader({required this.category});
+
+  @override
+  Widget build(BuildContext context) {
+    final c = AppColors.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(category.icon, size: 18, color: c.accent),
+            const SizedBox(width: 10),
+            Text(
+              category.label,
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.w600,
+                color: c.textPrimary,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        Text(category.desc, style: TextStyle(fontSize: 13, color: c.textMuted)),
+        const SizedBox(height: 16),
+        Divider(height: 1, color: c.border),
+      ],
+    );
+  }
+}
+
+// ─────────────────────────────────────────────
+// 设置卡片：每个设置项的统一容器
+// ─────────────────────────────────────────────
+
+class _SettingCard extends StatelessWidget {
+  final String label;
+  final String description;
+  final Widget child;
+  final bool vertical;
+
+  const _SettingCard({
+    required this.label,
+    required this.description,
+    required this.child,
+    this.vertical = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final c = AppColors.of(context);
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: c.surface1,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: c.border, width: 1),
+      ),
+      child: vertical
+          ? Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w500,
+                    color: c.textPrimary,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  description,
+                  style: TextStyle(fontSize: 12, color: c.textMuted),
+                ),
+                const SizedBox(height: 14),
+                child,
+              ],
+            )
+          : Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        label,
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w500,
+                          color: c.textPrimary,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        description,
+                        style: TextStyle(fontSize: 12, color: c.textMuted),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 16),
+                child,
+              ],
+            ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────
+// 通用设置
+// ─────────────────────────────────────────────
+
+class _GeneralContent extends StatelessWidget {
+  final SettingsProvider settingsProvider;
+
+  const _GeneralContent({super.key, required this.settingsProvider});
+
+  @override
+  Widget build(BuildContext context) {
     return ListenableBuilder(
       listenable: settingsProvider,
       builder: (context, _) {
         return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // 区块标题
-            Row(
-              children: [
-                Icon(LucideIcons.settings2, size: 16, color: c.textPrimary),
-                const SizedBox(width: 8),
-                Text(
-                  '通用',
-                  style: TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.w600,
-                    color: c.textPrimary,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 4),
-            Text(
-              '应用的基本行为设置',
-              style: TextStyle(fontSize: 12, color: c.textMuted),
-            ),
-            const SizedBox(height: 20),
-
-            // 开机启动
-            _SettingRow(
+            _SettingCard(
               label: '开机自启动',
               description: '系统启动时自动运行 FluxDown',
               child: ShadSwitch(
@@ -158,10 +479,8 @@ class _GeneralSection extends StatelessWidget {
                 },
               ),
             ),
-            const SizedBox(height: 20),
-
-            // 关闭到托盘
-            _SettingRow(
+            const SizedBox(height: 12),
+            _SettingCard(
               label: '关闭时最小化到托盘',
               description: '点击关闭按钮时隐藏到系统托盘，而非退出应用',
               child: ShadSwitch(
@@ -177,49 +496,28 @@ class _GeneralSection extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────
-// 外观设置区块
+// 外观设置
 // ─────────────────────────────────────────────
 
-class _AppearanceSection extends StatelessWidget {
-  const _AppearanceSection();
+class _AppearanceContent extends StatelessWidget {
+  const _AppearanceContent({super.key});
 
   @override
   Widget build(BuildContext context) {
-    final c = AppColors.of(context);
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        // 区块标题
-        Row(
-          children: [
-            Icon(LucideIcons.palette, size: 16, color: c.textPrimary),
-            const SizedBox(width: 8),
-            Text(
-              '外观',
-              style: TextStyle(
-                fontSize: 15,
-                fontWeight: FontWeight.w600,
-                color: c.textPrimary,
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 4),
-        Text('自定义应用的外观主题', style: TextStyle(fontSize: 12, color: c.textMuted)),
-        const SizedBox(height: 20),
-
-        // 主题模式
-        _SettingRow(
-          label: '主题',
+        _SettingCard(
+          label: '主题模式',
           description: '选择亮色、暗色或跟随系统',
+          vertical: true,
           child: const _ThemeModeSelector(),
         ),
-        const SizedBox(height: 20),
-
-        // 主题色
-        _SettingRow(
+        const SizedBox(height: 12),
+        _SettingCard(
           label: '主题色',
           description: '选择应用的主色调',
+          vertical: true,
           child: const _ColorSchemeSelector(),
         ),
       ],
@@ -228,73 +526,44 @@ class _AppearanceSection extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────
-// 下载设置区块
+// 下载设置
 // ─────────────────────────────────────────────
 
-class _DownloadSection extends StatelessWidget {
+class _DownloadContent extends StatelessWidget {
   final SettingsProvider settingsProvider;
 
-  const _DownloadSection({required this.settingsProvider});
+  const _DownloadContent({super.key, required this.settingsProvider});
 
   @override
   Widget build(BuildContext context) {
-    final c = AppColors.of(context);
     return ListenableBuilder(
       listenable: settingsProvider,
       builder: (context, _) {
         return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // 区块标题
-            Row(
-              children: [
-                Icon(LucideIcons.download, size: 16, color: c.textPrimary),
-                const SizedBox(width: 8),
-                Text(
-                  '下载',
-                  style: TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.w600,
-                    color: c.textPrimary,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 4),
-            Text(
-              '配置下载引擎的默认参数',
-              style: TextStyle(fontSize: 12, color: c.textMuted),
-            ),
-            const SizedBox(height: 20),
-
-            // 默认保存目录
-            _SettingRow(
+            _SettingCard(
               label: '默认保存目录',
               description: '新建下载任务时的默认保存位置',
+              vertical: true,
               child: _SaveDirPicker(settingsProvider: settingsProvider),
             ),
-            const SizedBox(height: 20),
-
-            // 默认线程数
-            _SettingRow(
+            const SizedBox(height: 12),
+            _SettingCard(
               label: '默认线程数',
               description: '每个下载任务的默认分片数量',
               child: _SegmentSelector(settingsProvider: settingsProvider),
             ),
-            const SizedBox(height: 20),
-
-            // 最大同时下载数
-            _SettingRow(
+            const SizedBox(height: 12),
+            _SettingCard(
               label: '最大同时下载数',
               description: '同时进行的最大下载任务数量',
               child: _ConcurrentSelector(settingsProvider: settingsProvider),
             ),
-            const SizedBox(height: 20),
-
-            // 速度限制
-            _SettingRow(
+            const SizedBox(height: 12),
+            _SettingCard(
               label: '速度限制',
               description: '限制全局下载速度（0 表示不限制）',
+              vertical: true,
               child: _SpeedLimitInput(settingsProvider: settingsProvider),
             ),
           ],
@@ -333,7 +602,7 @@ class _SaveDirPicker extends StatelessWidget {
             height: 36,
             padding: const EdgeInsets.symmetric(horizontal: 12),
             decoration: BoxDecoration(
-              color: c.surface1,
+              color: c.bg,
               borderRadius: BorderRadius.circular(6),
               border: Border.all(color: c.border, width: 1),
             ),
@@ -472,44 +741,6 @@ class _SpeedLimitInputState extends State<_SpeedLimitInput> {
 }
 
 // ─────────────────────────────────────────────
-// 通用设置行
-// ─────────────────────────────────────────────
-
-class _SettingRow extends StatelessWidget {
-  final String label;
-  final String description;
-  final Widget child;
-
-  const _SettingRow({
-    required this.label,
-    required this.description,
-    required this.child,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final c = AppColors.of(context);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          label,
-          style: TextStyle(
-            fontSize: 13,
-            fontWeight: FontWeight.w500,
-            color: c.textPrimary,
-          ),
-        ),
-        const SizedBox(height: 2),
-        Text(description, style: TextStyle(fontSize: 12, color: c.textMuted)),
-        const SizedBox(height: 10),
-        child,
-      ],
-    );
-  }
-}
-
-// ─────────────────────────────────────────────
 // 主题模式选择器（亮色 / 暗色 / 跟随系统）
 // ─────────────────────────────────────────────
 
@@ -545,7 +776,7 @@ class _ThemeModeSelector extends StatelessWidget {
   }
 }
 
-class _ThemeModeCard extends StatelessWidget {
+class _ThemeModeCard extends StatefulWidget {
   final IconData icon;
   final String label;
   final bool selected;
@@ -561,45 +792,58 @@ class _ThemeModeCard extends StatelessWidget {
   });
 
   @override
+  State<_ThemeModeCard> createState() => _ThemeModeCardState();
+}
+
+class _ThemeModeCardState extends State<_ThemeModeCard> {
+  bool _isHovered = false;
+
+  @override
   Widget build(BuildContext context) {
     final theme = ShadTheme.of(context);
-    final borderColor = selected ? theme.colorScheme.primary : colors.border;
+    final c = widget.colors;
+    final selected = widget.selected;
+    final borderColor = selected ? theme.colorScheme.primary : c.border;
     final bgColor = selected
         ? theme.colorScheme.primary.withValues(alpha: 0.06)
-        : colors.surface1;
+        : _isHovered
+        ? c.hoverBg
+        : c.bg;
 
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        width: 88,
-        padding: const EdgeInsets.symmetric(vertical: 12),
-        decoration: BoxDecoration(
-          color: bgColor,
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: borderColor, width: selected ? 1.5 : 1),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              icon,
-              size: 20,
-              color: selected
-                  ? theme.colorScheme.primary
-                  : colors.textSecondary,
-            ),
-            const SizedBox(height: 6),
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 12,
-                fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
-                color: selected
-                    ? theme.colorScheme.primary
-                    : colors.textSecondary,
+    return MouseRegion(
+      onEnter: (_) => setState(() => _isHovered = true),
+      onExit: (_) => setState(() => _isHovered = false),
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          width: 96,
+          padding: const EdgeInsets.symmetric(vertical: 14),
+          decoration: BoxDecoration(
+            color: bgColor,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: borderColor, width: selected ? 1.5 : 1),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                widget.icon,
+                size: 20,
+                color: selected ? theme.colorScheme.primary : c.textSecondary,
               ),
-            ),
-          ],
+              const SizedBox(height: 8),
+              Text(
+                widget.label,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+                  color: selected ? theme.colorScheme.primary : c.textSecondary,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -620,8 +864,8 @@ class _ColorSchemeSelector extends StatelessWidget {
     final c = AppColors.of(context);
 
     return Wrap(
-      spacing: 8,
-      runSpacing: 8,
+      spacing: 10,
+      runSpacing: 10,
       children: [
         for (final scheme in AppColorScheme.values)
           _ColorDot(
@@ -635,7 +879,7 @@ class _ColorSchemeSelector extends StatelessWidget {
   }
 }
 
-class _ColorDot extends StatelessWidget {
+class _ColorDot extends StatefulWidget {
   final AppColorScheme scheme;
   final bool selected;
   final AppColors colors;
@@ -649,25 +893,58 @@ class _ColorDot extends StatelessWidget {
   });
 
   @override
+  State<_ColorDot> createState() => _ColorDotState();
+}
+
+class _ColorDotState extends State<_ColorDot> {
+  bool _isHovered = false;
+
+  @override
   Widget build(BuildContext context) {
+    final selected = widget.selected;
     return ShadTooltip(
-      builder: (_) => Text(scheme.label),
-      child: GestureDetector(
-        onTap: onTap,
-        child: Container(
-          width: 32,
-          height: 32,
-          decoration: BoxDecoration(
-            color: scheme.previewColor,
-            shape: BoxShape.circle,
-            border: Border.all(
-              color: selected ? colors.textPrimary : scheme.previewColor,
-              width: selected ? 2 : 0,
+      builder: (_) => Text(widget.scheme.label),
+      child: MouseRegion(
+        onEnter: (_) => setState(() => _isHovered = true),
+        onExit: (_) => setState(() => _isHovered = false),
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          onTap: widget.onTap,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 150),
+            width: 34,
+            height: 34,
+            decoration: BoxDecoration(
+              color: widget.scheme.previewColor,
+              shape: BoxShape.circle,
+              border: Border.all(
+                color: selected
+                    ? widget.colors.textPrimary
+                    : _isHovered
+                    ? widget.colors.textSecondary
+                    : widget.scheme.previewColor,
+                width: selected
+                    ? 2.5
+                    : _isHovered
+                    ? 1.5
+                    : 0,
+              ),
+              boxShadow: _isHovered || selected
+                  ? [
+                      BoxShadow(
+                        color: widget.scheme.previewColor.withValues(
+                          alpha: 0.3,
+                        ),
+                        blurRadius: 8,
+                        spreadRadius: 1,
+                      ),
+                    ]
+                  : null,
             ),
+            child: selected
+                ? const Icon(LucideIcons.check, size: 15, color: Colors.white)
+                : null,
           ),
-          child: selected
-              ? const Icon(LucideIcons.check, size: 14, color: Colors.white)
-              : null,
         ),
       ),
     );

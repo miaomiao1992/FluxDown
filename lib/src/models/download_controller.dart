@@ -5,7 +5,10 @@ import 'package:flutter/foundation.dart';
 import 'package:rinf/rinf.dart';
 
 import '../bindings/bindings.dart';
+import '../services/log_service.dart';
 import 'download_task.dart';
+
+const _tag = 'DownloadCtrl';
 
 /// 顶部 Tab 状态筛选
 enum StatusTab { all, downloading, completed, paused, error }
@@ -17,11 +20,17 @@ class DownloadController extends ChangeNotifier {
   FileCategory _categoryFilter = FileCategory.all;
   StatusTab _statusTab = StatusTab.all;
 
+  /// 下载完成回调 — 当任务状态从非 completed 变为 completed 时触发
+  void Function(DownloadTask task)? onTaskCompleted;
+
   StreamSubscription<RustSignalPack<TaskProgress>>? _progressSub;
   StreamSubscription<RustSignalPack<AllTasks>>? _allTasksSub;
   StreamSubscription<RustSignalPack<SegmentProgress>>? _segmentSub;
 
+  bool _disposed = false;
+
   DownloadController() {
+    logInfo(_tag, 'constructor — starting listeners');
     _startListening();
     // 启动时请求所有持久化任务
     const RequestAllTasks().sendSignalToRust();
@@ -29,10 +38,19 @@ class DownloadController extends ChangeNotifier {
 
   @override
   void dispose() {
+    logInfo(_tag, 'dispose called');
+    _disposed = true;
     _progressSub?.cancel();
     _allTasksSub?.cancel();
     _segmentSub?.cancel();
     super.dispose();
+    logInfo(_tag, 'dispose done');
+  }
+
+  /// 安全的 notifyListeners — dispose 后不再通知，避免
+  /// "A DownloadController was used after being disposed" 异常
+  void _safeNotifyListeners() {
+    if (!_disposed) notifyListeners();
   }
 
   // ---------------------------------------------------------------------------
@@ -144,6 +162,10 @@ class DownloadController extends ChangeNotifier {
     String fileName = '',
     int segments = 0,
   }) {
+    logInfo(
+      _tag,
+      'createTask: url=$url, dir=$saveDir, file=$fileName, seg=$segments',
+    );
     CreateTask(
       url: url,
       saveDir: saveDir,
@@ -153,6 +175,7 @@ class DownloadController extends ChangeNotifier {
   }
 
   void pauseTask(String taskId) {
+    logInfo(_tag, 'pauseTask: $taskId');
     // 乐观更新：立即切换到 paused 状态，防止用户快速重复点击
     final idx = _tasks.indexWhere((t) => t.id == taskId);
     if (idx >= 0) {
@@ -162,54 +185,58 @@ class DownloadController extends ChangeNotifier {
           t.status == TaskStatus.resuming ||
           t.status == TaskStatus.pending) {
         _tasks[idx] = t.copyWith(status: TaskStatus.paused, speed: 0);
-        notifyListeners();
+        _safeNotifyListeners();
       }
     }
     ControlTask(taskId: taskId, action: 0).sendSignalToRust();
   }
 
   void resumeTask(String taskId) {
+    logInfo(_tag, 'resumeTask: $taskId');
     // 立即切换到 resuming 状态，让 UI 即时响应
     final idx = _tasks.indexWhere((t) => t.id == taskId);
     if (idx >= 0) {
       _tasks[idx] = _tasks[idx].copyWith(status: TaskStatus.resuming);
-      notifyListeners();
+      _safeNotifyListeners();
     }
     ControlTask(taskId: taskId, action: 1).sendSignalToRust();
   }
 
   void cancelTask(String taskId) {
+    logInfo(_tag, 'cancelTask: $taskId');
     ControlTask(taskId: taskId, action: 2).sendSignalToRust();
   }
 
   /// 删除任务。[deleteFiles] 为 true 时同时删除磁盘上的已下载文件。
   void deleteTask(String taskId, {bool deleteFiles = true}) {
+    logInfo(_tag, 'deleteTask: $taskId, deleteFiles=$deleteFiles');
     final action = deleteFiles ? 3 : 4;
     ControlTask(taskId: taskId, action: action).sendSignalToRust();
     _tasks.removeWhere((t) => t.id == taskId);
     if (_selectedTaskId == taskId) _selectedTaskId = null;
-    notifyListeners();
+    _safeNotifyListeners();
   }
 
   void selectTask(String? taskId) {
     if (_selectedTaskId == taskId) return;
     _selectedTaskId = taskId;
-    notifyListeners();
+    _safeNotifyListeners();
   }
 
   void setCategoryFilter(FileCategory category) {
     if (_categoryFilter == category) return;
     _categoryFilter = category;
-    notifyListeners();
+    _safeNotifyListeners();
   }
 
   void setStatusTab(StatusTab tab) {
     if (_statusTab == tab) return;
     _statusTab = tab;
-    notifyListeners();
+    _safeNotifyListeners();
   }
 
   void pauseAll() {
+    logInfo(_tag, 'pauseAll');
     for (final t in _tasks) {
       if (t.status == TaskStatus.downloading ||
           t.status == TaskStatus.resuming ||
@@ -220,6 +247,7 @@ class DownloadController extends ChangeNotifier {
   }
 
   void resumeAll() {
+    logInfo(_tag, 'resumeAll');
     for (final t in _tasks) {
       if (t.status == TaskStatus.paused || t.status == TaskStatus.error) {
         resumeTask(t.id);
@@ -249,51 +277,62 @@ class DownloadController extends ChangeNotifier {
   }
 
   void _onAllTasks(RustSignalPack<AllTasks> pack) {
+    if (_disposed) {
+      logInfo(_tag, '_onAllTasks skipped (disposed)');
+      return;
+    }
     final incoming = pack.message.tasks;
+    logInfo(_tag, '_onAllTasks: received ${incoming.length} tasks');
     _tasks.clear();
     for (final info in incoming) {
       _tasks.add(DownloadTask.fromTaskInfo(info));
     }
-    notifyListeners();
+    _safeNotifyListeners();
   }
 
   void _onProgress(RustSignalPack<TaskProgress> pack) {
+    if (_disposed) return;
     final p = pack.message;
+    final newStatus = taskStatusFromInt(p.status);
     final idx = _tasks.indexWhere((t) => t.id == p.taskId);
     if (idx >= 0) {
+      final oldStatus = _tasks[idx].status;
       _tasks[idx] = _tasks[idx].applyProgress(p);
+      // 检测下载完成：从非 completed 状态变为 completed
+      if (oldStatus != TaskStatus.completed &&
+          newStatus == TaskStatus.completed) {
+        logInfo(_tag, 'task completed: ${p.taskId} (${p.fileName})');
+        onTaskCompleted?.call(_tasks[idx]);
+      }
     } else {
       // 新任务（刚刚创建的）
-      _tasks.insert(
-        0,
-        DownloadTask(
-          id: p.taskId,
-          url: p.url,
-          fileName: p.fileName.isEmpty ? '未知文件' : p.fileName,
-          saveDir: p.saveDir,
-          status: taskStatusFromInt(p.status),
-          downloadedBytes: p.downloadedBytes,
-          totalBytes: p.totalBytes,
-          speed: p.speed,
-          errorMessage: p.errorMessage,
-        ),
+      logInfo(_tag, 'new task from progress: ${p.taskId} status=$newStatus');
+      final task = DownloadTask(
+        id: p.taskId,
+        url: p.url,
+        fileName: p.fileName.isEmpty ? '未知文件' : p.fileName,
+        saveDir: p.saveDir,
+        status: newStatus,
+        downloadedBytes: p.downloadedBytes,
+        totalBytes: p.totalBytes,
+        speed: p.speed,
+        errorMessage: p.errorMessage,
       );
+      _tasks.insert(0, task);
+      // 新任务直接以 completed 状态出现（如瞬间完成的小文件）
+      if (newStatus == TaskStatus.completed) {
+        logInfo(_tag, 'new task instantly completed: ${p.taskId}');
+        onTaskCompleted?.call(task);
+      }
     }
-    notifyListeners();
+    _safeNotifyListeners();
   }
 
   void _onSegmentProgress(RustSignalPack<SegmentProgress> pack) {
+    if (_disposed) return;
     final sp = pack.message;
-    debugPrint(
-      '[seg-vis] Dart received SegmentProgress: task=${sp.taskId}, '
-      'segCount=${sp.segmentCount}, totalBytes=${sp.totalBytes}, '
-      'segments=${sp.segments.length}',
-    );
     final idx = _tasks.indexWhere((t) => t.id == sp.taskId);
-    if (idx < 0) {
-      debugPrint('[seg-vis] task not found in _tasks!');
-      return;
-    }
+    if (idx < 0) return;
 
     final segments = sp.segments
         .map(
@@ -306,10 +345,7 @@ class DownloadController extends ChangeNotifier {
         )
         .toList();
 
-    debugPrint(
-      '[seg-vis] updating task[$idx] with ${segments.length} segments',
-    );
     _tasks[idx] = _tasks[idx].copyWith(segments: segments);
-    notifyListeners();
+    _safeNotifyListeners();
   }
 }

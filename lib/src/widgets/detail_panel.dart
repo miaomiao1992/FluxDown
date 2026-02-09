@@ -56,7 +56,7 @@ class DetailPanel extends StatelessWidget {
             children: [
               // 顶部占位，与 titlebar 齐平
               SizedBox(
-                height: 42,
+                height: 48,
                 child: DecoratedBox(
                   decoration: BoxDecoration(
                     border: Border(

@@ -43,9 +43,7 @@ class _NewDownloadDialogContentState extends State<_NewDownloadDialogContent> {
   @override
   void initState() {
     super.initState();
-    // 使用 SettingsProvider 中的默认保存目录
     _saveDirController.text = widget.settingsProvider.defaultSaveDir;
-    // 从剪切板自动识别 HTTP/HTTPS URL
     _pasteUrlFromClipboard();
   }
 
@@ -55,7 +53,6 @@ class _NewDownloadDialogContentState extends State<_NewDownloadDialogContent> {
       final data = await Clipboard.getData(Clipboard.kTextPlain);
       if (data == null || data.text == null) return;
       final text = data.text!.trim();
-      // 匹配以 http:// / https:// / ftp:// 开头的 URL（取第一行，忽略多行内容）
       final firstLine = text.split('\n').first.trim();
       final urlPattern = RegExp(r'^(https?|ftp)://\S+', caseSensitive: false);
       final match = urlPattern.firstMatch(firstLine);
@@ -63,7 +60,7 @@ class _NewDownloadDialogContentState extends State<_NewDownloadDialogContent> {
         _urlController.text = match.group(0)!;
       }
     } catch (_) {
-      // 剪切板访问失败时静默忽略（如权限不足等）
+      // 剪切板访问失败时静默忽略
     }
   }
 
@@ -96,8 +93,6 @@ class _NewDownloadDialogContentState extends State<_NewDownloadDialogContent> {
 
     final rename = _renameController.text.trim();
 
-    // 使用选择的线程数：「自动」= 0（由 Rust 动态计算），
-    // 未选择则使用设置中的默认值
     final segments = switch (selectedThreads) {
       '自动' => 0,
       '4' => 4,
@@ -105,7 +100,7 @@ class _NewDownloadDialogContentState extends State<_NewDownloadDialogContent> {
       '16' => 16,
       '32' => 32,
       '64' => 64,
-      _ => 0, // default to auto
+      _ => 0,
     };
 
     widget.controller.createTask(
@@ -122,14 +117,38 @@ class _NewDownloadDialogContentState extends State<_NewDownloadDialogContent> {
   Widget build(BuildContext context) {
     final c = AppColors.of(context);
     return ShadDialog(
-      title: const Text('新建下载'),
+      title: Row(
+        children: [
+          Container(
+            width: 28,
+            height: 28,
+            decoration: BoxDecoration(
+              color: c.accent.withValues(alpha: 0.1),
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: Icon(LucideIcons.download, size: 14, color: c.accent),
+          ),
+          const SizedBox(width: 10),
+          const Text('新建下载'),
+        ],
+      ),
       description: const Text('添加新的下载任务'),
       actions: [
         ShadButton.outline(
           onPressed: () => Navigator.of(context).pop(),
           child: const Text('取消'),
         ),
-        ShadButton(onPressed: _startDownload, child: const Text('开始下载')),
+        ShadButton(
+          onPressed: _startDownload,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(LucideIcons.download, size: 13, color: Colors.white),
+              const SizedBox(width: 6),
+              const Text('开始下载', style: TextStyle(color: Colors.white)),
+            ],
+          ),
+        ),
       ],
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 16),
@@ -137,42 +156,51 @@ class _NewDownloadDialogContentState extends State<_NewDownloadDialogContent> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            _label('下载链接', c),
-            const SizedBox(height: 4),
+            _SectionLabel(text: '下载链接', c: c),
+            const SizedBox(height: 6),
             ShadInput(
               controller: _urlController,
               placeholder: const Text('HTTP / HTTPS / FTP 链接'),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 14),
             Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
               children: [
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      _label('保存目录', c),
-                      const SizedBox(height: 4),
+                      _SectionLabel(text: '保存目录', c: c),
+                      const SizedBox(height: 6),
                       GestureDetector(
                         onTap: _pickSaveDir,
                         child: AbsorbPointer(
                           child: ShadInput(
                             controller: _saveDirController,
-                            placeholder: const Text('保存目录'),
+                            placeholder: const Text('选择保存目录'),
                             readOnly: true,
+                            trailing: Padding(
+                              padding: const EdgeInsets.only(right: 4),
+                              child: Icon(
+                                LucideIcons.folderOpen,
+                                size: 14,
+                                color: c.textMuted,
+                              ),
+                            ),
                           ),
                         ),
                       ),
                     ],
                   ),
                 ),
-                const SizedBox(width: 10),
+                const SizedBox(width: 12),
                 SizedBox(
                   width: 100,
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      _label('线程数', c),
-                      const SizedBox(height: 4),
+                      _SectionLabel(text: '线程数', c: c),
+                      const SizedBox(height: 6),
                       ShadSelect<String>(
                         placeholder: const Text('自动'),
                         options: ['自动', '4', '8', '16', '32', '64']
@@ -186,24 +214,32 @@ class _NewDownloadDialogContentState extends State<_NewDownloadDialogContent> {
                 ),
               ],
             ),
-            const SizedBox(height: 12),
-            _label('重命名（可选，留空自动识别）', c),
-            const SizedBox(height: 4),
+            const SizedBox(height: 14),
+            _SectionLabel(text: '重命名（可选，留空自动识别）', c: c),
+            const SizedBox(height: 6),
             ShadInput(
               controller: _renameController,
-              placeholder: const Text('可选'),
+              placeholder: const Text('自动识别文件名'),
             ),
           ],
         ),
       ),
     );
   }
+}
 
-  Widget _label(String text, AppColors c) {
+class _SectionLabel extends StatelessWidget {
+  final String text;
+  final AppColors c;
+
+  const _SectionLabel({required this.text, required this.c});
+
+  @override
+  Widget build(BuildContext context) {
     return Text(
       text,
       style: TextStyle(
-        fontSize: 11,
+        fontSize: 11.5,
         fontWeight: FontWeight.w500,
         color: c.textSecondary,
       ),
