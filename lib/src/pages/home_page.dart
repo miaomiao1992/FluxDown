@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../models/download_controller.dart';
 import '../models/settings_provider.dart';
 import '../services/log_service.dart';
@@ -24,9 +25,11 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   final _controller = DownloadController();
   final _settingsProvider = SettingsProvider();
+  final _headerBarKey = GlobalKey<HeaderBarState>();
 
   // 页面切换
   bool _showSettings = false;
+  SettingsCategory? _initialSettingsCategory;
 
   // Sidebar
   double _sidebarWidth = 224;
@@ -51,16 +54,31 @@ class _HomePageState extends State<HomePage> {
     // 监听下载完成事件 → 发送系统通知
     _controller.onTaskCompleted =
         NotificationService.instance.showDownloadComplete;
+    // 全局键盘快捷键
+    HardwareKeyboard.instance.addHandler(_onGlobalKey);
   }
 
   @override
   void dispose() {
     logInfo('HomePage', 'dispose');
+    HardwareKeyboard.instance.removeHandler(_onGlobalKey);
     _controller.onTaskCompleted = null;
     _controller.dispose();
     _settingsProvider.dispose();
     super.dispose();
     logInfo('HomePage', 'dispose done');
+  }
+
+  /// 全局快捷键处理 — 不依赖焦点树
+  bool _onGlobalKey(KeyEvent event) {
+    if (event is! KeyDownEvent) return false;
+    // Ctrl+F → 聚焦搜索框
+    if (HardwareKeyboard.instance.isControlPressed &&
+        event.logicalKey == LogicalKeyboardKey.keyF) {
+      _headerBarKey.currentState?.focusSearch();
+      return true;
+    }
+    return false;
   }
 
   void _openDetail() {
@@ -104,8 +122,12 @@ class _HomePageState extends State<HomePage> {
           ColoredBox(
             color: c.bg,
             child: SettingsPage(
-              onBack: () => setState(() => _showSettings = false),
+              onBack: () => setState(() {
+                _showSettings = false;
+                _initialSettingsCategory = null;
+              }),
               settingsProvider: _settingsProvider,
+              initialCategory: _initialSettingsCategory,
             ),
           ),
           // 窗口控制按钮 — 始终固定在窗口右上角
@@ -114,7 +136,10 @@ class _HomePageState extends State<HomePage> {
             right: 0,
             child: WindowControls(
               controller: _controller,
-              onSettings: () => setState(() => _showSettings = false),
+              onSettings: () => setState(() {
+                _showSettings = false;
+                _initialSettingsCategory = null;
+              }),
               isSettingsActive: true,
             ),
           ),
@@ -173,11 +198,19 @@ class _HomePageState extends State<HomePage> {
                     child: Column(
                       children: [
                         HeaderBar(
+                          key: _headerBarKey,
+                          controller: _controller,
                           onNewDownload: () => showNewDownloadDialog(
                             context,
                             _controller,
                             _settingsProvider,
                           ),
+                          onNavigateToSettings: (category) {
+                            setState(() {
+                              _initialSettingsCategory = category;
+                              _showSettings = true;
+                            });
+                          },
                         ),
                         TaskTabBar(controller: _controller),
                         Expanded(

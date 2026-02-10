@@ -68,19 +68,23 @@ class TaskList extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final c = AppColors.of(context);
     return ListenableBuilder(
       listenable: controller,
       builder: (context, _) {
         final tasks = controller.filteredTasks;
-        return Column(
-          children: [
-            _buildHeader(context),
-            Expanded(
-              child: tasks.isEmpty
-                  ? _buildEmpty(context)
-                  : _buildListWithBlankArea(context, tasks),
-            ),
-          ],
+        return ColoredBox(
+          color: c.bg,
+          child: Column(
+            children: [
+              _buildHeader(context),
+              Expanded(
+                child: tasks.isEmpty
+                    ? _buildEmpty(context)
+                    : _buildListWithBlankArea(context, tasks),
+              ),
+            ],
+          ),
         );
       },
     );

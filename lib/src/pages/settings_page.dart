@@ -11,7 +11,7 @@ import '../widgets/title_drag_area.dart';
 // 设置分类枚举
 // ─────────────────────────────────────────────
 
-enum _SettingsCategory {
+enum SettingsCategory {
   general(icon: LucideIcons.settings2, label: '通用', desc: '基本行为设置'),
   appearance(icon: LucideIcons.palette, label: '外观', desc: '主题与配色'),
   download(icon: LucideIcons.download, label: '下载', desc: '下载引擎配置');
@@ -20,12 +20,89 @@ enum _SettingsCategory {
   final String label;
   final String desc;
 
-  const _SettingsCategory({
+  const SettingsCategory({
     required this.icon,
     required this.label,
     required this.desc,
   });
 }
+
+/// 设置项搜索元数据 — 每个设置项对应的分类 + 搜索关键词
+class SettingsSearchItem {
+  final SettingsCategory category;
+  final String label;
+  final String description;
+  final List<String> keywords;
+  final IconData icon;
+
+  const SettingsSearchItem({
+    required this.category,
+    required this.label,
+    required this.description,
+    required this.keywords,
+    required this.icon,
+  });
+}
+
+/// 所有可搜索的设置项列表
+const List<SettingsSearchItem> settingsSearchItems = [
+  SettingsSearchItem(
+    category: SettingsCategory.general,
+    label: '开机自启动',
+    description: '系统启动时自动运行 FluxDown',
+    keywords: ['开机', '自启动', '启动', 'startup', 'auto', 'boot'],
+    icon: LucideIcons.power,
+  ),
+  SettingsSearchItem(
+    category: SettingsCategory.general,
+    label: '关闭时最小化到托盘',
+    description: '点击关闭按钮时隐藏到系统托盘',
+    keywords: ['关闭', '托盘', '最小化', 'tray', 'close', 'minimize'],
+    icon: LucideIcons.panelBottomClose,
+  ),
+  SettingsSearchItem(
+    category: SettingsCategory.appearance,
+    label: '主题模式',
+    description: '选择亮色、暗色或跟随系统',
+    keywords: ['主题', '亮色', '暗色', '深色', '模式', 'theme', 'dark', 'light'],
+    icon: LucideIcons.sunMoon,
+  ),
+  SettingsSearchItem(
+    category: SettingsCategory.appearance,
+    label: '主题色',
+    description: '选择应用的主色调',
+    keywords: ['主题色', '颜色', '配色', '色调', 'color', 'scheme', 'accent'],
+    icon: LucideIcons.palette,
+  ),
+  SettingsSearchItem(
+    category: SettingsCategory.download,
+    label: '默认保存目录',
+    description: '新建下载任务时的默认保存位置',
+    keywords: ['保存', '目录', '路径', '文件夹', 'save', 'directory', 'path', 'folder'],
+    icon: LucideIcons.folderOpen,
+  ),
+  SettingsSearchItem(
+    category: SettingsCategory.download,
+    label: '默认线程数',
+    description: '每个下载任务的默认分片数量',
+    keywords: ['线程', '分片', '并行', 'segment', 'thread'],
+    icon: LucideIcons.layers,
+  ),
+  SettingsSearchItem(
+    category: SettingsCategory.download,
+    label: '最大同时下载数',
+    description: '同时进行的最大下载任务数量',
+    keywords: ['同时', '并发', '并行', '数量', 'concurrent', 'parallel', 'max'],
+    icon: LucideIcons.listOrdered,
+  ),
+  SettingsSearchItem(
+    category: SettingsCategory.download,
+    label: '速度限制',
+    description: '限制全局下载速度',
+    keywords: ['速度', '限速', '限制', 'speed', 'limit', '带宽', 'bandwidth'],
+    icon: LucideIcons.gauge,
+  ),
+];
 
 // ─────────────────────────────────────────────
 // 设置页面（带侧边栏导航）
@@ -34,11 +111,13 @@ enum _SettingsCategory {
 class SettingsPage extends StatefulWidget {
   final VoidCallback onBack;
   final SettingsProvider settingsProvider;
+  final SettingsCategory? initialCategory;
 
   const SettingsPage({
     super.key,
     required this.onBack,
     required this.settingsProvider,
+    this.initialCategory,
   });
 
   @override
@@ -46,7 +125,13 @@ class SettingsPage extends StatefulWidget {
 }
 
 class _SettingsPageState extends State<SettingsPage> {
-  _SettingsCategory _selected = _SettingsCategory.general;
+  late SettingsCategory _selected;
+
+  @override
+  void initState() {
+    super.initState();
+    _selected = widget.initialCategory ?? SettingsCategory.general;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -128,8 +213,8 @@ class _SettingsPageState extends State<SettingsPage> {
 // ─────────────────────────────────────────────
 
 class _SettingsSidebar extends StatelessWidget {
-  final _SettingsCategory selected;
-  final ValueChanged<_SettingsCategory> onSelect;
+  final SettingsCategory selected;
+  final ValueChanged<SettingsCategory> onSelect;
 
   const _SettingsSidebar({required this.selected, required this.onSelect});
 
@@ -156,7 +241,7 @@ class _SettingsSidebar extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 4),
-          for (final cat in _SettingsCategory.values)
+          for (final cat in SettingsCategory.values)
             _SettingsNavItem(
               icon: cat.icon,
               label: cat.label,
@@ -268,7 +353,7 @@ class _SettingsNavItemState extends State<_SettingsNavItem> {
 // ─────────────────────────────────────────────
 
 class _SettingsContent extends StatelessWidget {
-  final _SettingsCategory category;
+  final SettingsCategory category;
   final SettingsProvider settingsProvider;
 
   const _SettingsContent({
@@ -301,14 +386,14 @@ class _SettingsContent extends StatelessWidget {
                   );
                 },
                 child: switch (category) {
-                  _SettingsCategory.general => _GeneralContent(
+                  SettingsCategory.general => _GeneralContent(
                     key: const ValueKey('general'),
                     settingsProvider: settingsProvider,
                   ),
-                  _SettingsCategory.appearance => const _AppearanceContent(
+                  SettingsCategory.appearance => const _AppearanceContent(
                     key: ValueKey('appearance'),
                   ),
-                  _SettingsCategory.download => _DownloadContent(
+                  SettingsCategory.download => _DownloadContent(
                     key: ValueKey('download'),
                     settingsProvider: settingsProvider,
                   ),
@@ -327,7 +412,7 @@ class _SettingsContent extends StatelessWidget {
 // ─────────────────────────────────────────────
 
 class _SectionHeader extends StatelessWidget {
-  final _SettingsCategory category;
+  final SettingsCategory category;
 
   const _SectionHeader({required this.category});
 
