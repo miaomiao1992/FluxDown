@@ -191,6 +191,34 @@ function parseFeedbackBody(body: string): {
   return { description, metadata };
 }
 
+/**
+ * 解析网站访客回复评论，剥离包装元数据，只返回实际内容。
+ *
+ * 格式:
+ *   > 💬 Website visitor reply
+ *
+ *   实际回复内容
+ *
+ *   ---
+ *
+ *   **Source:** Website reply
+ *   **Time:** 2026-02-15T13:20:27.295Z
+ *
+ * 非此格式的评论原样返回。
+ */
+function parseVisitorComment(body: string): string {
+  if (!body.includes("Website visitor reply")) return body;
+
+  let content = body.replace(/^>\s*\uD83D\uDCAC\s*Website visitor reply\s*\n*/u, "");
+
+  const sepIdx = content.indexOf("\n---\n");
+  if (sepIdx >= 0) {
+    content = content.slice(0, sepIdx);
+  }
+
+  return content.trim();
+}
+
 async function fetchIssueDetail(issueNumber: number): Promise<IssueDetail> {
   // 检查缓存
   const cached = detailCache.get(issueNumber);
@@ -258,7 +286,7 @@ async function fetchIssueDetail(issueNumber: number): Promise<IssueDetail> {
         login: c.user.login,
         avatar_url: c.user.avatar_url,
       },
-      body: c.body,
+      body: parseVisitorComment(c.body),
       created_at: c.created_at,
       updated_at: c.updated_at,
       reactions: c.reactions,

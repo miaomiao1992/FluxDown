@@ -95,10 +95,6 @@ jobs:
 
       # ── Build ──
       - name: Build Flutter Windows app
-        env:
-          CFLAGS: ${{ matrix.arch == 'arm64' && '/std:c11 /experimental:c11atomics' || '' }}
-          AWS_LC_SYS_CMAKE_BUILDER: ${{ matrix.arch == 'arm64' && '1' || '' }}
-          AWS_LC_SYS_NO_ASM: ${{ matrix.arch == 'arm64' && '1' || '' }}
         run: flutter build windows --release --build-name=${{ steps.version.outputs.VERSION }} --build-number=1 --dart-define=APP_VERSION=${{ steps.version.outputs.VERSION }}
 
       # ── ARM64: Flutter 在 ARM64 runner 上以 x64 仿真运行，输出到 build\windows\x64

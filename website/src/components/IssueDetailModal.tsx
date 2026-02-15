@@ -578,73 +578,74 @@ export default function IssueDetailModal({ issueNumber, onClose }: IssueDetailMo
             {/* Reply box */}
             {data && !loading && (
               <div className="shrink-0 border-t border-dark-border bg-dark-surface1 px-5 py-4">
-                <div className="flex gap-3">
-                  <textarea
-                    rows={2}
-                    maxLength={2000}
-                    value={replyBody}
-                    onChange={(e) => setReplyBody(e.target.value)}
-                    placeholder={t("issueDetail.replyPlaceholder")}
-                    className="flex-1 rounded-lg border border-dark-border bg-dark-surface2 px-3 py-2 text-sm text-dark-text placeholder:text-dark-text-muted focus:outline-none focus:border-brand-blue/50 focus:ring-1 focus:ring-brand-blue/30 transition-colors resize-none"
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-                        e.preventDefault();
-                        handleReplySubmit();
-                      }
-                    }}
-                  />
-                  <button
-                    type="button"
-                    onClick={handleReplySubmit}
-                    disabled={!replyBody.trim() || replyStatus === "sending"}
-                    className={`self-end shrink-0 inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-medium transition-all duration-200 ${
-                      replyBody.trim() && replyStatus !== "sending"
-                        ? "bg-brand-blue text-white hover:bg-brand-blue/90 shadow-md shadow-brand-blue/20 cursor-pointer"
-                        : "bg-dark-surface3 text-dark-text-muted cursor-not-allowed"
-                    }`}
-                  >
-                    {replyStatus === "sending" ? (
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                    ) : (
-                      <Send className="w-4 h-4" />
-                    )}
-                    {replyStatus === "sending"
-                      ? t("issueDetail.replySending")
-                      : t("issueDetail.replySend")}
-                  </button>
-                </div>
+                <textarea
+                  rows={2}
+                  maxLength={2000}
+                  value={replyBody}
+                  onChange={(e) => setReplyBody(e.target.value)}
+                  placeholder={t("issueDetail.replyPlaceholder")}
+                  className="w-full rounded-lg border border-dark-border bg-dark-surface2 px-3 py-2 text-sm text-dark-text placeholder:text-dark-text-muted focus:outline-none focus:border-brand-blue/50 focus:ring-1 focus:ring-brand-blue/30 transition-colors resize-none"
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+                      e.preventDefault();
+                      handleReplySubmit();
+                    }
+                  }}
+                />
 
                 <div className="flex items-center justify-between mt-2">
                   <span className="text-[10px] text-dark-text-muted">
                     {t("issueDetail.replyCharCount", { count: String(replyBody.length) })}
                   </span>
 
-                  <AnimatePresence mode="wait">
-                    {replyStatus === "success" && (
-                      <motion.span
-                        key="reply-ok"
-                        initial={{ opacity: 0, x: 10 }}
-                        animate={{ opacity: 1, x: 0 }}
-                        exit={{ opacity: 0 }}
-                        className="flex items-center gap-1 text-xs text-success"
-                      >
-                        <CheckCircle2 className="w-3 h-3" />
-                        {t("issueDetail.replySuccess")}
-                      </motion.span>
-                    )}
-                    {replyStatus === "error" && (
-                      <motion.span
-                        key="reply-err"
-                        initial={{ opacity: 0, x: 10 }}
-                        animate={{ opacity: 1, x: 0 }}
-                        exit={{ opacity: 0 }}
-                        className="flex items-center gap-1 text-xs text-danger"
-                      >
-                        <AlertCircle className="w-3 h-3" />
-                        {replyError}
-                      </motion.span>
-                    )}
-                  </AnimatePresence>
+                  <div className="flex items-center gap-2">
+                    <AnimatePresence mode="wait">
+                      {replyStatus === "success" && (
+                        <motion.span
+                          key="reply-ok"
+                          initial={{ opacity: 0, x: 10 }}
+                          animate={{ opacity: 1, x: 0 }}
+                          exit={{ opacity: 0 }}
+                          className="flex items-center gap-1 text-xs text-success"
+                        >
+                          <CheckCircle2 className="w-3 h-3" />
+                          {t("issueDetail.replySuccess")}
+                        </motion.span>
+                      )}
+                      {replyStatus === "error" && (
+                        <motion.span
+                          key="reply-err"
+                          initial={{ opacity: 0, x: 10 }}
+                          animate={{ opacity: 1, x: 0 }}
+                          exit={{ opacity: 0 }}
+                          className="flex items-center gap-1 text-xs text-danger"
+                        >
+                          <AlertCircle className="w-3 h-3" />
+                          {replyError}
+                        </motion.span>
+                      )}
+                    </AnimatePresence>
+
+                    <button
+                      type="button"
+                      onClick={handleReplySubmit}
+                      disabled={!replyBody.trim() || replyStatus === "sending"}
+                      className={`shrink-0 inline-flex items-center gap-1.5 rounded-lg px-4 py-1.5 text-sm font-medium transition-all duration-200 ${
+                        replyBody.trim() && replyStatus !== "sending"
+                          ? "bg-brand-blue text-white hover:bg-brand-blue/90 shadow-md shadow-brand-blue/20 cursor-pointer"
+                          : "bg-dark-surface3 text-dark-text-muted cursor-not-allowed"
+                      }`}
+                    >
+                      {replyStatus === "sending" ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Send className="w-4 h-4" />
+                      )}
+                      {replyStatus === "sending"
+                        ? t("issueDetail.replySending")
+                        : t("issueDetail.replySend")}
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
