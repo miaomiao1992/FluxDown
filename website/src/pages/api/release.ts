@@ -64,29 +64,38 @@ export const GET: APIRoute = async () => {
   }
 
   try {
-    // 获取最新的非草稿 Release
-    const res = await fetch(
-      `https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=5`,
-      {
+    // 拉取全部 release（自动分页），用于计算总下载量
+    const allReleases: GitHubRelease[] = [];
+    let url: string | null =
+      `https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=100`;
+
+    while (url) {
+      const res = await fetch(url, {
         headers: {
           Authorization: `Bearer ${GITHUB_TOKEN}`,
           Accept: "application/vnd.github+json",
           "X-GitHub-Api-Version": "2022-11-28",
         },
-      },
-    );
+      });
 
-    if (!res.ok) {
-      const text = await res.text();
-      return new Response(
-        JSON.stringify({ error: `GitHub API error: ${res.status}`, detail: text }),
-        { status: 502, headers: { "Content-Type": "application/json" } },
-      );
+      if (!res.ok) {
+        const text = await res.text();
+        return new Response(
+          JSON.stringify({ error: `GitHub API error: ${res.status}`, detail: text }),
+          { status: 502, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      const page: GitHubRelease[] = await res.json();
+      allReleases.push(...page);
+
+      const link = res.headers.get("Link");
+      const next = link?.match(/<([^>]+)>;\s*rel="next"/);
+      url = next ? next[1] : null;
     }
 
-    const releases: GitHubRelease[] = await res.json();
+    const releases = allReleases;
 
-    // 找到第一个非草稿、非预发布的 Release
     const latest = releases.find((r) => !r.draft && !r.prerelease);
 
     if (!latest) {
