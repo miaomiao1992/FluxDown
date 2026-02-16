@@ -294,6 +294,11 @@ class _FeedbackDialogContentState extends State<_FeedbackDialogContent> {
               maxLines: 1,
               c: c,
             ),
+            const SizedBox(height: 4),
+            Text(
+              s.feedbackContactHint,
+              style: TextStyle(fontSize: 11, color: c.textMuted),
+            ),
           ],
         ),
       ),

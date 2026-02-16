@@ -171,6 +171,7 @@ const zhCN: Messages = {
   "fb.contactLabel": "联系方式",
   "fb.contactPlaceholder":
     "邮箱或其他联系方式",
+  "fb.contactHint": "填写邮箱可收到反馈进度通知，其他联系方式可能无法收到通知",
   "fb.optional": "可选",
   "fb.submit": "提交反馈",
   "fb.submitting": "提交中...",

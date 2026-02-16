@@ -189,6 +189,7 @@ export default function FeedbackSection() {
                 placeholder={t("fb.contactPlaceholder")}
                 className="w-full rounded-lg border border-dark-border bg-dark-surface2 px-4 py-2.5 text-sm text-dark-text placeholder:text-dark-text-muted focus:outline-none focus:border-brand-blue/50 focus:ring-1 focus:ring-brand-blue/30 transition-colors"
               />
+              <p className="mt-1.5 text-xs text-dark-text-muted">{t("fb.contactHint")}</p>
             </div>
 
             {/* Submit Button + Status */}

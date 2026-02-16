@@ -153,6 +153,7 @@ const en = {
   "fb.descPlaceholder": "Describe your idea or the issue you encountered in detail...",
   "fb.contactLabel": "Contact",
   "fb.contactPlaceholder": "Email or other way to reach you",
+  "fb.contactHint": "Enter your email to receive progress notifications. Other contact methods may not receive notifications.",
   "fb.optional": "optional",
   "fb.submit": "Submit Feedback",
   "fb.submitting": "Submitting...",

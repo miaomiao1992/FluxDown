@@ -597,6 +597,10 @@ class S {
   String get feedbackContactLabel => _t('联系方式', 'Contact');
   String get feedbackContactPlaceholder =>
       _t('邮箱或其他联系方式', 'Email or other contact info');
+  String get feedbackContactHint => _t(
+    '填写邮箱可收到反馈进度通知，其他联系方式可能无法收到通知',
+    'Enter your email to receive progress notifications. Other contact methods may not receive notifications.',
+  );
   String get feedbackOptional => _t('可选', 'Optional');
   String get feedbackSubmit => _t('提交', 'Submit');
   String get feedbackSubmitting => _t('提交中...', 'Submitting...');
