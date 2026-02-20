@@ -1,6 +1,7 @@
 const en = {
   // Announcement
   "announcement.1": "Vote: Should we create a WeChat group, QQ group, or Official Account? Join the discussion!",
+  "announcement.2": "QQ Group is live! Group number: 832143651. Join the FluxDown community now!",
   "announcement.close": "Close",
   "announcement.badge": "Announcements",
   "announcement.title": "Latest ",
@@ -10,6 +11,19 @@ const en = {
   "announcement.ended": "Ended",
   "announcement.viewDetail": "View Details",
   "announcement.empty": "No announcements yet.",
+
+  // QQ Group
+  "qqGroup.badge": "QQ Community",
+  "qqGroup.title": "Join the ",
+  "qqGroup.titleHighlight": "community",
+  "qqGroup.subtitle": "Scan the QR code or search the group number to join the FluxDown QQ group and chat with developers and other users.",
+  "qqGroup.groupNumber": "Group Number",
+  "qqGroup.copy": "Copy",
+  "qqGroup.copied": "Copied",
+  "qqGroup.howToJoin": "How to Join",
+  "qqGroup.step1": "Open QQ and scan the QR code above to join directly",
+  "qqGroup.step2": "Or search for group number 832143651 in QQ",
+  "qqGroup.step3": "Click to apply and wait for approval",
 
   // Vote
   "vote.badge": "Community Vote",

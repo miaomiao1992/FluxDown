@@ -10,10 +10,17 @@ export interface Announcement {
 
 export const ANNOUNCEMENTS: Announcement[] = [
   {
+    id: "qq-group-created",
+    messageKey: "announcement.2",
+    link: "/qq-group",
+    date: "2026-02-20",
+    active: true,
+  },
+  {
     id: "vote-community-group",
     messageKey: "announcement.1",
     link: "/vote",
     date: "2026-02-16",
-    active: true,
+    active: false,
   },
 ];

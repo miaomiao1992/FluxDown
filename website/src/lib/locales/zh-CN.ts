@@ -3,6 +3,7 @@ import type { Messages } from "./en";
 const zhCN: Messages = {
   // Announcement
   "announcement.1": "投票进行中：建微信群、QQ群还是公众号？快来参与投票吧！",
+  "announcement.2": "QQ 群已创建！群号：832143651，欢迎加入 FluxDown 社区交流群！",
   "announcement.close": "关闭",
   "announcement.badge": "公告",
   "announcement.title": "最新",
@@ -12,6 +13,19 @@ const zhCN: Messages = {
   "announcement.ended": "已结束",
   "announcement.viewDetail": "查看详情",
   "announcement.empty": "暂无公告。",
+
+  // QQ Group
+  "qqGroup.badge": "QQ 社区群",
+  "qqGroup.title": "加入",
+  "qqGroup.titleHighlight": "社区群",
+  "qqGroup.subtitle": "扫描二维码或搜索群号加入 FluxDown QQ 交流群，与开发者和其他用户一起讨论。",
+  "qqGroup.groupNumber": "群号",
+  "qqGroup.copy": "复制",
+  "qqGroup.copied": "已复制",
+  "qqGroup.howToJoin": "如何加入",
+  "qqGroup.step1": "打开 QQ，扫描上方二维码直接加群",
+  "qqGroup.step2": "或在 QQ 中搜索群号 832143651",
+  "qqGroup.step3": "点击申请加入，等待审核通过即可",
 
   // Vote
   "vote.badge": "社区投票",
