@@ -169,6 +169,22 @@ impl Db {
         .await?
     }
 
+    /// 更新任务文件名（仅当任务文件名为空时，防止覆盖用户自定义名称）
+    pub async fn update_task_file_name(&self, task_id: &str, file_name: &str) -> Result<(), DbError> {
+        let conn = self.conn.clone();
+        let id = task_id.to_owned();
+        let name = file_name.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().map_err(|_| DbError::LockPoisoned)?;
+            conn.execute(
+                "UPDATE tasks SET file_name = ?1 WHERE id = ?2 AND (file_name = '' OR file_name IS NULL)",
+                params![name, id],
+            )?;
+            Ok(())
+        })
+        .await?
+    }
+
     /// 启动时将所有 downloading(1)、pending(0)、preparing(5) 的任务矫正为 paused(2)
     /// 因为重启后没有活跃的下载线程，这些任务实际上处于暂停状态
     pub async fn reset_incomplete_tasks_to_paused(&self) -> Result<u64, DbError> {

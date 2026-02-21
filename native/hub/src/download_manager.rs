@@ -17,7 +17,10 @@ use crate::dash_downloader;
 use crate::ftp_downloader;
 use crate::hls_downloader;
 use crate::proxy_config::ProxyConfig;
-use crate::signals::{AllTasks, SegmentDetail, SegmentProgress, TaskProgress};
+use crate::signals::{
+    AllTasks, QueuePosition, QueuePositionsUpdate, SegmentDetail, SegmentProgress, TaskMetaProbed,
+    TaskProgress,
+};
 use crate::speed_limiter::SpeedLimiter;
 
 /// Extract a human-readable message from a panic payload.
@@ -329,6 +332,20 @@ impl DownloadManager {
         }
     }
 
+    /// 广播当前 pending_queue 中所有任务的队列位置（每次队列变化后调用）
+    fn broadcast_queue_positions(&self) {
+        let positions: Vec<QueuePosition> = self
+            .pending_queue
+            .iter()
+            .enumerate()
+            .map(|(i, q)| QueuePosition {
+                task_id: q.task_id.clone(),
+                position: (i + 1) as i32,
+            })
+            .collect();
+        QueuePositionsUpdate { positions }.send_signal_to_dart();
+    }
+
     /// Whether we have a free slot for a new HTTP/FTP download.
     /// BT tasks are excluded from this count because they are managed by the
     /// shared librqbit session with its own concurrency controls.
@@ -363,6 +380,8 @@ impl DownloadManager {
                 self.do_start_task(queued).await;
             }
         }
+        // 队列变化后广播最新位置
+        self.broadcast_queue_positions();
     }
 
     // -----------------------------------------------------------------------
@@ -544,7 +563,32 @@ impl DownloadManager {
                 self.active_tokens.len(),
                 self.max_concurrent
             );
+            // 保存探测所需信息（queued 即将被 move 进队列）
+            let probe_tid = queued.task_id.clone();
+            let probe_url = queued.url.clone();
+            let probe_name = queued.file_name.clone();
             self.pending_queue.push_back(queued);
+            // 广播最新队列位置
+            self.broadcast_queue_positions();
+            // Spawn 元数据探测（后台，非阻塞）
+            let probe_client = self.client.clone();
+            let probe_db = self.db.clone();
+            tokio::spawn(async move {
+                let (name, size) =
+                    crate::meta_prober::probe_task_meta(&probe_url, &probe_name, &probe_client)
+                        .await;
+                if !name.is_empty() || size > 0 {
+                    if !name.is_empty() {
+                        let _ = probe_db.update_task_file_name(&probe_tid, &name).await;
+                    }
+                    TaskMetaProbed {
+                        task_id: probe_tid,
+                        file_name: name,
+                        total_bytes: size,
+                    }
+                    .send_signal_to_dart();
+                }
+            });
         }
     }
 
@@ -721,6 +765,8 @@ impl DownloadManager {
         // Remove from pending queue if queued (not yet started).
         if let Some(pos) = self.pending_queue.iter().position(|q| q.task_id == task_id) {
             self.pending_queue.remove(pos);
+            // 广播更新后的队列位置
+            self.broadcast_queue_positions();
             let _ = self.db.update_task_status(task_id, 2, "").await;
             if let Ok(Some(t)) = self.db.load_task_by_id(task_id).await {
                 TaskProgress {

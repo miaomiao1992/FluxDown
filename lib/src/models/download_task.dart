@@ -205,6 +205,9 @@ class DownloadTask {
   /// Recent split events (for animation). Kept for a short window then cleared.
   final List<SplitEventData> recentSplits;
 
+  /// 在 pending_queue 中的排队位置（1-based）。-1 = 不在队列中。
+  final int queuePosition;
+
   DownloadTask({
     required this.id,
     required this.url,
@@ -218,6 +221,7 @@ class DownloadTask {
     this.isSelected = false,
     this.segments,
     this.recentSplits = const [],
+    this.queuePosition = -1,
     DateTime? createdAt,
   }) : createdAt = createdAt ?? DateTime.now();
 
@@ -252,6 +256,7 @@ class DownloadTask {
     bool? isSelected,
     List<SegmentData>? segments,
     List<SplitEventData>? recentSplits,
+    int? queuePosition,
     DateTime? createdAt,
   }) {
     return DownloadTask(
@@ -267,6 +272,7 @@ class DownloadTask {
       isSelected: isSelected ?? this.isSelected,
       segments: segments ?? this.segments,
       recentSplits: recentSplits ?? this.recentSplits,
+      queuePosition: queuePosition ?? this.queuePosition,
       createdAt: createdAt ?? this.createdAt,
     );
   }
@@ -368,7 +374,10 @@ class DownloadTask {
       case TaskStatus.error:
         return '$proto · $sizeText · ${errorMessage.isEmpty ? s.subtitleError : errorMessage}';
       case TaskStatus.pending:
-        return '$proto · ${s.subtitlePending}';
+        final queueStr =
+            queuePosition > 0 ? ' · ${s.subtitleQueued(queuePosition)}' : '';
+        if (totalBytes > 0) return '$proto · $sizeText$queueStr';
+        return '$proto · ${s.subtitlePending}$queueStr';
       case TaskStatus.preparing:
         return '$proto · ${s.subtitlePreparing}';
       case TaskStatus.resuming:
@@ -457,8 +466,27 @@ enum TimeGroup {
 
 /// 任务分组数据
 class TaskGroup {
-  final TimeGroup group;
+  /// null 表示「活跃任务组」（正在下载 + 排队），不可折叠
+  final TimeGroup? group;
   final List<DownloadTask> tasks;
 
-  const TaskGroup({required this.group, required this.tasks});
+  const TaskGroup({this.group, required this.tasks});
+
+  /// 是否为活跃任务组（不按时间分组，不可折叠）
+  bool get isActiveGroup => group == null;
+}
+
+// =============================================================================
+// TaskStatus 扩展
+// =============================================================================
+
+extension TaskStatusExt on TaskStatus {
+  /// 是否为"活跃"状态（正在下载 / 准备 / 恢复中）
+  bool get isActive =>
+      this == TaskStatus.downloading ||
+      this == TaskStatus.preparing ||
+      this == TaskStatus.resuming;
+
+  /// 是否为"活跃或排队"状态（置顶显示）
+  bool get isActiveOrQueued => isActive || this == TaskStatus.pending;
 }

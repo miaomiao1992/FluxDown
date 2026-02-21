@@ -101,17 +101,26 @@ class TaskList extends StatelessWidget {
     return CustomScrollView(
       slivers: [
         for (final group in groups) ...[
-          // 分组头
+          // 分组头：活跃组用专属 header，时间分组用可折叠 header
           SliverToBoxAdapter(
-            child: _GroupHeader(
-              group: group.group,
-              taskCount: group.tasks.length,
-              isCollapsed: controller.isGroupCollapsed(group.group),
-              onToggle: () => controller.toggleGroupCollapsed(group.group),
-            ),
+            child: group.isActiveGroup
+                ? _ActiveGroupHeader(
+                    taskCount: group.tasks.length,
+                    hasDownloading: group.tasks
+                        .any((t) => t.status == TaskStatus.downloading),
+                    onPauseAll: () => controller.pauseAll(),
+                  )
+                : _GroupHeader(
+                    group: group.group!,
+                    taskCount: group.tasks.length,
+                    isCollapsed: controller.isGroupCollapsed(group.group),
+                    onToggle: () =>
+                        controller.toggleGroupCollapsed(group.group!),
+                  ),
           ),
-          // 分组内的任务列表（折叠时不渲染）
-          if (!controller.isGroupCollapsed(group.group))
+          // 活跃组永不折叠；时间分组支持折叠
+          if (group.isActiveGroup ||
+              !controller.isGroupCollapsed(group.group))
             SliverList(
               delegate: SliverChildBuilderDelegate((context, index) {
                 final task = group.tasks[index];
@@ -346,6 +355,112 @@ class _ManageToggleButtonState extends State<_ManageToggleButton> {
               const SizedBox(width: 3),
               Text(
                 s.manage,
+                style: TextStyle(
+                  fontSize: 11,
+                  color: _isHovered ? c.textPrimary : c.textMuted,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// =============================================================================
+// 活跃任务组头部（不可折叠）
+// =============================================================================
+
+class _ActiveGroupHeader extends StatelessWidget {
+  final int taskCount;
+  final bool hasDownloading;
+  final VoidCallback onPauseAll;
+
+  const _ActiveGroupHeader({
+    required this.taskCount,
+    required this.hasDownloading,
+    required this.onPauseAll,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final c = AppColors.of(context);
+    final s = LocaleScope.of(context);
+
+    return Container(
+      height: 32,
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      decoration: BoxDecoration(
+        color: c.surface1,
+        border: Border(bottom: BorderSide(color: c.border, width: 1)),
+      ),
+      child: Row(
+        children: [
+          Icon(LucideIcons.zap, size: 12, color: c.accent),
+          const SizedBox(width: 6),
+          Text(
+            s.activeGroupLabel,
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+              color: c.textSecondary,
+            ),
+          ),
+          const SizedBox(width: 6),
+          Text(
+            '$taskCount',
+            style: TextStyle(fontSize: 11, color: c.textMuted),
+          ),
+          const Spacer(),
+          if (hasDownloading) _PauseAllButton(onTap: onPauseAll),
+        ],
+      ),
+    );
+  }
+}
+
+class _PauseAllButton extends StatefulWidget {
+  final VoidCallback onTap;
+
+  const _PauseAllButton({required this.onTap});
+
+  @override
+  State<_PauseAllButton> createState() => _PauseAllButtonState();
+}
+
+class _PauseAllButtonState extends State<_PauseAllButton> {
+  bool _isHovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = AppColors.of(context);
+    final s = LocaleScope.of(context);
+
+    return MouseRegion(
+      onEnter: (_) => setState(() => _isHovered = true),
+      onExit: (_) => setState(() => _isHovered = false),
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: Container(
+          height: 22,
+          padding: const EdgeInsets.symmetric(horizontal: 6),
+          decoration: BoxDecoration(
+            color: _isHovered ? c.hoverBg : Colors.transparent,
+            borderRadius: BorderRadius.circular(4),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                LucideIcons.pause,
+                size: 12,
+                color: _isHovered ? c.textPrimary : c.textMuted,
+              ),
+              const SizedBox(width: 3),
+              Text(
+                s.pauseAll,
                 style: TextStyle(
                   fontSize: 11,
                   color: _isHovered ? c.textPrimary : c.textMuted,

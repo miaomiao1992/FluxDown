@@ -80,6 +80,7 @@ class S {
   String get subtitleResuming => _t('恢复中...', 'Resuming...');
   String get unknownSize => _t('未知大小', 'Unknown Size');
   String get unknownFile => _t('未知文件', 'Unknown File');
+  String subtitleQueued(int pos) => _t('排队 #$pos', 'Queue #$pos');
 
   // ─────────────────────────────────────────────
   // 时间单位
@@ -133,6 +134,7 @@ class S {
   // ─────────────────────────────────────────────
 
   String get startAll => _t('全部开始', 'Start All');
+  String get activeGroupLabel => _t('正在下载', 'Active');
   String get emptyTitle => _t('暂无下载任务', 'No Downloads');
   String get emptySubtitle =>
       _t('点击「新建下载」或右键开始', 'Click "New Download" or right-click to start');

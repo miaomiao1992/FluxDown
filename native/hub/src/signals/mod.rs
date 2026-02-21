@@ -329,3 +329,26 @@ pub struct CheckUrlProtocol {}
 pub struct UrlProtocolStatus {
     pub is_registered: bool,
 }
+
+// ========== Queue / meta-probe signals ==========
+
+/// 队列任务探测到元数据 (Rust → Dart)
+#[derive(Serialize, RustSignal)]
+pub struct TaskMetaProbed {
+    pub task_id: String,
+    pub file_name: String,  // 空 = 无法探测
+    pub total_bytes: i64,   // 0 = 未知
+}
+
+/// 队列位置批量更新 (Rust → Dart) — 每次队列变化时广播
+#[derive(Serialize, RustSignal)]
+pub struct QueuePositionsUpdate {
+    pub positions: Vec<QueuePosition>,
+}
+
+/// 单个任务的队列位置
+#[derive(Serialize, Deserialize, SignalPiece)]
+pub struct QueuePosition {
+    pub task_id: String,
+    pub position: i32, // 1-based，0 = 不在队列
+}

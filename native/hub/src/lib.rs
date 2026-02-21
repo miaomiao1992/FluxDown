@@ -5,6 +5,7 @@ mod download_manager;
 mod downloader;
 mod file_association;
 mod ftp_downloader;
+mod meta_prober;
 mod protocol_registry;
 mod hls_downloader;
 mod dash_downloader;

@@ -39,6 +39,8 @@ class DownloadController extends ChangeNotifier {
   StreamSubscription<RustSignalPack<AllTasks>>? _allTasksSub;
   StreamSubscription<RustSignalPack<SegmentProgress>>? _segmentSub;
   StreamSubscription<RustSignalPack<SegmentSplitEvent>>? _splitSub;
+  StreamSubscription<RustSignalPack<TaskMetaProbed>>? _metaProbedSub;
+  StreamSubscription<RustSignalPack<QueuePositionsUpdate>>? _queuePosSub;
 
   bool _disposed = false;
 
@@ -57,6 +59,8 @@ class DownloadController extends ChangeNotifier {
     _allTasksSub?.cancel();
     _segmentSub?.cancel();
     _splitSub?.cancel();
+    _metaProbedSub?.cancel();
+    _queuePosSub?.cancel();
     super.dispose();
     logInfo(_tag, 'dispose done');
   }
@@ -144,27 +148,61 @@ class DownloadController extends ChangeNotifier {
     };
   }
 
-  /// 将 filteredTasks 按时间分组（保持组内顺序不变）
+  /// 将 filteredTasks 分组：活跃+排队任务置顶，历史任务按时间分组
   List<TaskGroup> get groupedTasks {
     final tasks = filteredTasks;
-    final Map<TimeGroup, List<DownloadTask>> map = {};
-    for (final task in tasks) {
-      final group = TimeGroup.fromDateTime(task.createdAt);
-      (map[group] ??= []).add(task);
+
+    // "全部" 和 "下载中" Tab：活跃+排队任务组置顶，历史任务按时间分组
+    if (_statusTab == StatusTab.all || _statusTab == StatusTab.downloading) {
+      final activeTasks =
+          tasks.where((t) => t.status.isActiveOrQueued).toList()
+            ..sort(_compareActiveTasks);
+      final historicalTasks =
+          tasks.where((t) => !t.status.isActiveOrQueued).toList();
+      return [
+        if (activeTasks.isNotEmpty)
+          TaskGroup(group: null, tasks: activeTasks),
+        ..._buildTimeGroups(historicalTasks),
+      ];
     }
-    // 按 TimeGroup 枚举顺序排列（today → older）
-    final result = <TaskGroup>[];
-    for (final g in TimeGroup.values) {
-      final list = map[g];
-      if (list != null && list.isNotEmpty) {
-        result.add(TaskGroup(group: g, tasks: list));
-      }
-    }
-    return result;
+    return _buildTimeGroups(tasks);
   }
 
-  /// 某个时间分组是否折叠
-  bool isGroupCollapsed(TimeGroup group) => _collapsedGroups[group] ?? false;
+  List<TaskGroup> _buildTimeGroups(List<DownloadTask> tasks) {
+    final Map<TimeGroup, List<DownloadTask>> map = {};
+    for (final task in tasks) {
+      (map[TimeGroup.fromDateTime(task.createdAt)] ??= []).add(task);
+    }
+    return [
+      for (final g in TimeGroup.values)
+        if (map[g] != null && map[g]!.isNotEmpty)
+          TaskGroup(group: g, tasks: map[g]!),
+    ];
+  }
+
+  int _compareActiveTasks(DownloadTask a, DownloadTask b) {
+    int priority(TaskStatus s) => switch (s) {
+      TaskStatus.downloading => 0,
+      TaskStatus.preparing => 1,
+      TaskStatus.resuming => 1,
+      TaskStatus.pending => 2,
+      _ => 3,
+    };
+    final diff = priority(a.status).compareTo(priority(b.status));
+    if (diff != 0) return diff;
+    // pending：按队列位置升序（位置仅在入队/出队时变化，稳定）
+    if (a.status == TaskStatus.pending) {
+      return a.queuePosition.compareTo(b.queuePosition);
+    }
+    // 活跃任务（downloading/preparing/resuming）：按创建时间升序，顺序稳定不抖动
+    return a.createdAt.compareTo(b.createdAt);
+  }
+
+  /// 某个时间分组是否折叠（active group 永不折叠）
+  bool isGroupCollapsed(TimeGroup? group) {
+    if (group == null) return false; // 活跃组不可折叠
+    return _collapsedGroups[group] ?? false;
+  }
 
   /// 切换某个时间分组的折叠状态
   void toggleGroupCollapsed(TimeGroup group) {
@@ -520,6 +558,9 @@ class DownloadController extends ChangeNotifier {
     _progressSub = TaskProgress.rustSignalStream.listen(_onProgress);
     _segmentSub = SegmentProgress.rustSignalStream.listen(_onSegmentProgress);
     _splitSub = SegmentSplitEvent.rustSignalStream.listen(_onSplitEvent);
+    _metaProbedSub = TaskMetaProbed.rustSignalStream.listen(_onTaskMetaProbed);
+    _queuePosSub =
+        QueuePositionsUpdate.rustSignalStream.listen(_onQueuePositionsUpdate);
   }
 
   void _onAllTasks(RustSignalPack<AllTasks> pack) {
@@ -653,5 +694,34 @@ class DownloadController extends ChangeNotifier {
       'proactive=${evt.isProactive}, total=${evt.totalSegments}',
     );
     _safeNotifyListeners();
+  }
+
+  void _onTaskMetaProbed(RustSignalPack<TaskMetaProbed> pack) {
+    if (_disposed) return;
+    final p = pack.message;
+    if (_deletedTaskIds.contains(p.taskId)) return;
+    final idx = _tasks.indexWhere((t) => t.id == p.taskId);
+    if (idx < 0) return;
+    _tasks[idx] = _tasks[idx].copyWith(
+      fileName: p.fileName.isNotEmpty ? p.fileName : null,
+      totalBytes: p.totalBytes > 0 ? p.totalBytes : null,
+    );
+    _safeNotifyListeners();
+  }
+
+  void _onQueuePositionsUpdate(RustSignalPack<QueuePositionsUpdate> pack) {
+    if (_disposed) return;
+    final posMap = {
+      for (final p in pack.message.positions) p.taskId: p.position,
+    };
+    bool changed = false;
+    for (int i = 0; i < _tasks.length; i++) {
+      final newPos = posMap[_tasks[i].id] ?? -1;
+      if (_tasks[i].queuePosition != newPos) {
+        _tasks[i] = _tasks[i].copyWith(queuePosition: newPos);
+        changed = true;
+      }
+    }
+    if (changed) _safeNotifyListeners();
   }
 }
