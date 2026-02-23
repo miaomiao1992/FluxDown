@@ -6,6 +6,7 @@
  * - 不支持的语言回退到英文
  */
 
+import { browser } from 'wxt/browser';
 import zhCN from './locales/zh-CN';
 import en from './locales/en';
 import type { MessageKey } from './locales/zh-CN';
@@ -50,7 +51,7 @@ export async function initI18n(): Promise<string> {
   let locale: string;
 
   try {
-    const result = await chrome.storage.local.get(STORAGE_KEY);
+    const result = await browser.storage.local.get(STORAGE_KEY);
     locale = result[STORAGE_KEY] || detectBrowserLocale();
   } catch {
     // 非扩展环境(如测试)直接使用浏览器检测
@@ -89,7 +90,7 @@ export function setLocale(locale: string): void {
 export async function saveLocale(locale: string): Promise<void> {
   setLocale(locale);
   try {
-    await chrome.storage.local.set({ [STORAGE_KEY]: locale });
+    await browser.storage.local.set({ [STORAGE_KEY]: locale });
   } catch {
     // 非扩展环境忽略
   }

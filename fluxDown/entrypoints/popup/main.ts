@@ -71,7 +71,7 @@ function applyTheme(mode: ThemeMode) {
 }
 
 async function initTheme() {
-  const result = await chrome.storage.local.get('theme') ?? {};
+  const result = await browser.storage.local.get('theme') ?? {};
   const saved: ThemeMode = result.theme || 'system';
   applyTheme(saved);
 }
@@ -86,11 +86,11 @@ async function toggleTheme() {
     next = currentAttr === 'dark' ? 'light' : 'dark';
   }
   applyTheme(next);
-  await chrome.storage.local.set({ theme: next });
+  await browser.storage.local.set({ theme: next });
 }
 
 window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', async () => {
-  const result = await chrome.storage.local.get('theme') ?? {};
+  const result = await browser.storage.local.get('theme') ?? {};
   if (!result.theme || result.theme === 'system') {
     applyTheme('system');
   }
@@ -129,14 +129,14 @@ function renderExtTags(extensions: string[]) {
 }
 
 async function removeExtension(ext: string) {
-  const result = await chrome.storage.sync.get('settings') ?? {};
+  const result = await browser.storage.sync.get('settings') ?? {};
   const settings = result.settings || {};
   const exts: string[] = settings.interceptExtensions || [];
   const idx = exts.indexOf(ext);
   if (idx !== -1) {
     exts.splice(idx, 1);
     settings.interceptExtensions = exts;
-    await chrome.storage.sync.set({ settings });
+    await browser.storage.sync.set({ settings });
     renderExtTags(exts);
     showToast(t('fileType.removed', { ext }));
   }
@@ -153,7 +153,7 @@ async function addExtension(ext: string) {
     return;
   }
 
-  const result = await chrome.storage.sync.get('settings') ?? {};
+  const result = await browser.storage.sync.get('settings') ?? {};
   const settings = result.settings || {};
   const exts: string[] = settings.interceptExtensions || [];
 
@@ -164,7 +164,7 @@ async function addExtension(ext: string) {
 
   exts.push(ext);
   settings.interceptExtensions = exts;
-  await chrome.storage.sync.set({ settings });
+  await browser.storage.sync.set({ settings });
   renderExtTags(exts);
   showToast(t('fileType.added', { ext }));
 }
@@ -201,14 +201,14 @@ function renderDomainList(domains: string[]) {
 }
 
 async function removeDomain(domain: string) {
-  const result = await chrome.storage.sync.get('settings') ?? {};
+  const result = await browser.storage.sync.get('settings') ?? {};
   const settings = result.settings || {};
   const domains: string[] = settings.excludeDomains || [];
   const idx = domains.indexOf(domain);
   if (idx !== -1) {
     domains.splice(idx, 1);
     settings.excludeDomains = domains;
-    await chrome.storage.sync.set({ settings });
+    await browser.storage.sync.set({ settings });
     renderDomainList(domains);
     showToast(t('domain.removed', { domain }));
   }
@@ -218,7 +218,7 @@ async function addDomain(domain: string) {
   domain = domain.trim().toLowerCase();
   if (!domain) return;
 
-  const result = await chrome.storage.sync.get('settings') ?? {};
+  const result = await browser.storage.sync.get('settings') ?? {};
   const settings = result.settings || {};
   const domains: string[] = settings.excludeDomains || [];
 
@@ -229,14 +229,14 @@ async function addDomain(domain: string) {
 
   domains.push(domain);
   settings.excludeDomains = domains;
-  await chrome.storage.sync.set({ settings });
+  await browser.storage.sync.set({ settings });
   renderDomainList(domains);
   showToast(t('domain.excluded', { domain }));
 }
 
 // ===== 统计 =====
 async function loadStats() {
-  const result = await chrome.storage.local.get('stats') ?? {};
+  const result = await browser.storage.local.get('stats') ?? {};
   const stats = result.stats || { sent: 0, failed: 0, date: '' };
 
   // 检查是否是今天的统计
@@ -244,7 +244,7 @@ async function loadStats() {
   if (stats.date !== today) {
     // 新的一天，重置
     const resetStats = { sent: 0, failed: 0, date: today };
-    await chrome.storage.local.set({ stats: resetStats });
+    await browser.storage.local.set({ stats: resetStats });
     statSent.textContent = '0';
     statFailed.textContent = '0';
     return;
@@ -290,7 +290,7 @@ async function init() {
   renderDomainList(settings.excludeDomains || []);
 
   // 悬浮球可见状态（未设置时默认显示）
-  const dotVisResult = await chrome.storage.local.get('fluxdown_dot_visible') ?? {};
+  const dotVisResult = await browser.storage.local.get('fluxdown_dot_visible') ?? {};
   dotVisibleToggle.checked = dotVisResult['fluxdown_dot_visible'] !== false;
 
   // 加载统计
@@ -344,14 +344,14 @@ themeBtn.addEventListener('click', toggleTheme);
 
 // 悬浮球显示/隐藏
 dotVisibleToggle.addEventListener('change', async () => {
-  await chrome.storage.local.set({ fluxdown_dot_visible: dotVisibleToggle.checked });
+  await browser.storage.local.set({ fluxdown_dot_visible: dotVisibleToggle.checked });
 });
 
 // 启用/禁用开关
 enableToggle.addEventListener('change', async () => {
   // R8-1 修复：sendMessage 可能因 background 未响应而返回 undefined，加守卫防止 TypeError
   try {
-    const res = await chrome.runtime.sendMessage({ action: 'toggleEnabled' });
+    const res = await browser.runtime.sendMessage({ action: 'toggleEnabled' });
     if (res?.enabled !== undefined) updateEnableHint(res.enabled);
   } catch {
     // background 未响应时不改变 hint 显示
@@ -362,15 +362,15 @@ enableToggle.addEventListener('change', async () => {
 interceptModeSelect.addEventListener('change', async () => {
   const mode = interceptModeSelect.value;
   updateModeHint(mode);
-  await chrome.runtime.sendMessage({ action: 'updateSettings', settings: { interceptMode: mode } });
+  await browser.runtime.sendMessage({ action: 'updateSettings', settings: { interceptMode: mode } });
 });
 
 // 最小文件大小
 minSizeSelect.addEventListener('change', async () => {
-  const result = await chrome.storage.sync.get('settings') ?? {};
+  const result = await browser.storage.sync.get('settings') ?? {};
   const settings = result.settings || {};
   settings.minFileSize = parseInt(minSizeSelect.value, 10);
-  await chrome.storage.sync.set({ settings });
+  await browser.storage.sync.set({ settings });
 });
 
 // 扩展名 - 显示输入框
@@ -432,7 +432,7 @@ domainInput.addEventListener('keydown', (e) => {
 // 添加当前域名
 addCurrentDomainBtn.addEventListener('click', async () => {
   try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
     if (tab?.url) {
       const hostname = new URL(tab.url).hostname;
       if (hostname) {
@@ -449,7 +449,7 @@ addCurrentDomainBtn.addEventListener('click', async () => {
 // 重置统计
 resetStatsBtn.addEventListener('click', async () => {
   const today = new Date().toDateString();
-  await chrome.storage.local.set({ stats: { sent: 0, failed: 0, date: today } });
+  await browser.storage.local.set({ stats: { sent: 0, failed: 0, date: today } });
   statSent.textContent = '0';
   statFailed.textContent = '0';
   showToast(t('stats.resetDone'));

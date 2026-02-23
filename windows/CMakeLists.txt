@@ -111,3 +111,20 @@ install(FILES "${AOT_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/runner/resources/app_icon.ico"
   DESTINATION "${CMAKE_INSTALL_PREFIX}"
   COMPONENT Runtime)
+
+# === fluxdown_nmh: NMH relay binary ===
+# Build the Native Messaging Host relay binary alongside the app so that
+# nmh_registry::find_nmh_exe() always finds it next to flux_down.exe
+# (search path #1), covering Debug / Profile / Release and CI release builds.
+set(_NMH_WORKSPACE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/..")
+add_custom_target(fluxdown_nmh ALL
+  COMMAND cargo build -p fluxdown_nmh --release
+  WORKING_DIRECTORY "${_NMH_WORKSPACE_DIR}"
+  COMMENT "Building fluxdown_nmh NMH relay binary"
+  VERBATIM
+)
+add_dependencies(${BINARY_NAME} fluxdown_nmh)
+install(PROGRAMS "${_NMH_WORKSPACE_DIR}/target/release/fluxdown_nmh.exe"
+  DESTINATION "${CMAKE_INSTALL_PREFIX}"
+  COMPONENT Runtime
+)

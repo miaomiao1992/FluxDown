@@ -198,6 +198,18 @@ pub async fn run(db_dir: PathBuf) {
         }
     });
 
+    // Auto-register NMH (Native Messaging Host) for browser extension communication.
+    // Only re-registers when the registry is missing, incomplete, or stale (exe path changed).
+    tokio::task::spawn_blocking(|| {
+        if !crate::nmh_registry::needs_update() {
+            rinf::debug_print!("[actor] NMH already registered and up to date");
+            return;
+        }
+        if let Err(e) = crate::nmh_registry::register() {
+            rinf::debug_print!("[actor] NMH registration failed: {}", e);
+        }
+    });
+
     loop {
         tokio::select! {
             Some(signal) = create_recv.recv() => {

@@ -88,7 +88,7 @@ export default defineContentScript({
     ui.mount();
 
     /* ========== 消息监听 ========== */
-    chrome.runtime.onMessage.addListener((msg) => {
+    browser.runtime.onMessage.addListener((msg) => {
       if (msg.action === 'resourcesUpdated' && Array.isArray(msg.resources)) {
         resources = msg.resources;
         render();
@@ -99,7 +99,7 @@ export default defineContentScript({
     });
 
     /* ========== 语言变化监听 ========== */
-    chrome.storage.onChanged.addListener((changes, area) => {
+    browser.storage.onChanged.addListener((changes, area) => {
       if (area !== 'local') return;
       if (changes['fluxdown_locale']) {
         const newLocale = changes['fluxdown_locale'].newValue;
@@ -115,7 +115,7 @@ export default defineContentScript({
     });
 
     try {
-      const resp = await chrome.runtime.sendMessage({ action: 'getResources' });
+      const resp = await browser.runtime.sendMessage({ action: 'getResources' });
       if (resp?.resources?.length > 0) {
         resources = resp.resources;
         render();
@@ -282,7 +282,7 @@ export default defineContentScript({
       hideBtn.title = t('panel.hideDot');
       hideBtn.innerHTML = svg(SVG_EYE_OFF);
       hideBtn.addEventListener('click', () => {
-        chrome.storage.local.set({ [DOT_VISIBLE_KEY]: false });
+        browser.storage.local.set({ [DOT_VISIBLE_KEY]: false });
         if (panelOpen) togglePanel();
       });
       header.appendChild(hideBtn);
@@ -322,7 +322,7 @@ export default defineContentScript({
 
         // 一次性发送所有选中资源给 Background，由 Background 端顺序执行
         // 避免循环 sendMessage 导致 Chrome MV3 消息通道串行阻塞，只有第一个被处理
-        chrome.runtime.sendMessage({
+        browser.runtime.sendMessage({
           action: 'batchDownload',
           items: items.map((r) => ({
             url: r.url,
@@ -362,7 +362,7 @@ export default defineContentScript({
         if (!hoverVideo) return;
         const src = hoverVideo.currentSrc || hoverVideo.src;
         if (src && !src.startsWith('blob:') && !src.startsWith('data:')) {
-          chrome.runtime.sendMessage({
+          browser.runtime.sendMessage({
             action: 'downloadResource', url: src, referrer: location.href,
           }).catch(() => {});
         }
@@ -435,7 +435,7 @@ export default defineContentScript({
       };
 
       try {
-        chrome.storage.local.get([STORAGE_KEY, DOT_VISIBLE_KEY]).then((r) => {
+        browser.storage.local.get([STORAGE_KEY, DOT_VISIBLE_KEY]).then((r) => {
           const safeR = r ?? {};
           const pos = safeR[STORAGE_KEY];
           if (pos && typeof pos === 'object') {
@@ -462,7 +462,7 @@ export default defineContentScript({
 
     function saveDotPosition(y: number, s: 'left' | 'right'): void {
       try {
-        chrome.storage.local.set({ [STORAGE_KEY]: { y, side: s } });
+        browser.storage.local.set({ [STORAGE_KEY]: { y, side: s } });
       } catch { /* */ }
     }
 
@@ -596,7 +596,7 @@ export default defineContentScript({
 
       const dl = row.querySelector('.dl-btn') as HTMLButtonElement;
       dl.addEventListener('click', () => {
-        chrome.runtime.sendMessage({
+        browser.runtime.sendMessage({
           action: 'downloadResource',
           url: r.url, referrer: r.pageUrl || location.href,
           filename: r.filename,

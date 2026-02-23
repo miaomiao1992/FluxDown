@@ -60,13 +60,13 @@ function incrementStat(field: 'sent' | 'failed'): Promise<void> {
   _statChain = _statChain.then(async () => {
     try {
       const today = new Date().toDateString();
-      const result = await chrome.storage.local.get('stats');
+      const result = await browser.storage.local.get('stats');
       let stats: DailyStats = result.stats || { sent: 0, failed: 0, date: '' };
       if (stats.date !== today) {
         stats = { sent: 0, failed: 0, date: today };
       }
       stats[field]++;
-      await chrome.storage.local.set({ stats });
+      await browser.storage.local.set({ stats });
     } catch { /* storage 失败不影响主流程 */ }
   });
   return _statChain;
@@ -113,7 +113,7 @@ export default defineBackground(() => {
   }
 
   // 监听 storage 变化，立即失效缓存
-  chrome.storage.onChanged.addListener((changes, area) => {
+  browser.storage.onChanged.addListener((changes, area) => {
     if (area === 'sync' && changes.settings) {
       _settingsCache = null;
       _settingsCacheTs = 0;
@@ -164,7 +164,7 @@ export default defineBackground(() => {
   const sendHeadersOpts: string[] = ['requestHeaders'];
   try {
     // 先尝试带 extraHeaders（Chrome MV3），失败则降级（Firefox）
-    chrome.webRequest.onSendHeaders.addListener(
+    browser.webRequest.onSendHeaders.addListener(
       onSendHeadersHandler,
       { urls: ['<all_urls>'] },
       [...sendHeadersOpts, 'extraHeaders'] as any,
@@ -172,7 +172,7 @@ export default defineBackground(() => {
     console.log('[FluxDown] webRequest.onSendHeaders listener registered (with extraHeaders)');
   } catch {
     try {
-      chrome.webRequest.onSendHeaders.addListener(
+      browser.webRequest.onSendHeaders.addListener(
         onSendHeadersHandler,
         { urls: ['<all_urls>'] },
         sendHeadersOpts,
@@ -224,7 +224,7 @@ export default defineBackground(() => {
   // 下载类 Content-Type 时，说明这是一个"导航转下载"的请求。
   // 缓存其信息，供 onCreated 兜底拦截使用。
   try {
-    chrome.webRequest.onHeadersReceived.addListener(
+    browser.webRequest.onHeadersReceived.addListener(
       (details) => {
         // 只关注主框架导航（sub_frame、xhr 等交给正常 download 流程处理）
         if (details.type !== 'main_frame') return;
@@ -299,7 +299,7 @@ export default defineBackground(() => {
   // 检测可下载的媒体资源，加入资源列表供 UI 展示
   // ==========================================
   try {
-    chrome.webRequest.onHeadersReceived.addListener(
+    browser.webRequest.onHeadersReceived.addListener(
       (details) => {
         // 跳过无效或非 tab 请求
         if (details.tabId < 0 || !details.responseHeaders) return;
@@ -369,7 +369,7 @@ export default defineBackground(() => {
   async function notifyContentScript(tabId: number): Promise<void> {
     const resources = getResourcesForTab(tabId);
     try {
-      await chrome.tabs.sendMessage(tabId, {
+      await browser.tabs.sendMessage(tabId, {
         action: 'resourcesUpdated',
         resources,
       });
@@ -397,7 +397,7 @@ export default defineBackground(() => {
 
   // Firefox 不支持 onDeterminingFilename，兜底层是唯一拦截路径，
   // 需要更长等待让浏览器填充 downloadItem 元数据
-  const hasDeterminingFilename = !!chrome.downloads.onDeterminingFilename;
+  const hasDeterminingFilename = !!browser.downloads.onDeterminingFilename;
 
   // ──────────────────────────────────────────────────────────────
   // 弱网可靠性：统一等待元数据就绪
@@ -441,7 +441,7 @@ export default defineBackground(() => {
 
       // 路径B：downloadItem 元数据就绪
       try {
-        const results = await chrome.downloads.search({ id: downloadId });
+        const results = await browser.downloads.search({ id: downloadId });
         if (results && results.length > 0) {
           const item = results[0];
           if (item.state === 'complete' || (item as any).state === 'interrupted') {
@@ -471,7 +471,7 @@ export default defineBackground(() => {
   }
 
   // === 第三层：onCreated 兜底 + onChanged 元数据补全 ===
-  chrome.downloads.onCreated.addListener((downloadItem) => {
+  browser.downloads.onCreated.addListener((downloadItem) => {
     const downloadId = downloadItem.id;
     const url = downloadItem.url;
 
@@ -649,15 +649,11 @@ export default defineBackground(() => {
 
     // cancel + erase 并发执行（替代 suggest({ cancel: true })）
     // 必须 await erase，否则下载项残留浏览器下载列表，可能引发二次触发
-    //
-    // Firefox MV2 兼容性修复：chrome.downloads.cancel() 在 Firefox 中可能返回
-    // undefined（旧式 callback API 兼容层），直接 .catch() 会抛出 TypeError。
-    // 用 Promise.resolve() 包裹确保始终得到一个真正的 Promise。
     await Promise.allSettled([
-      Promise.resolve(chrome.downloads.cancel(downloadId)).catch((e) => {
+      browser.downloads.cancel(downloadId).catch((e) => {
         console.warn('[FluxDown] Fallback: failed to cancel download:', e);
       }),
-      Promise.resolve(chrome.downloads.erase({ id: downloadId })).catch((e) => {
+      browser.downloads.erase({ id: downloadId }).catch((e) => {
         console.warn('[FluxDown] Fallback: failed to erase download:', e);
       }),
     ]);
@@ -678,7 +674,7 @@ export default defineBackground(() => {
   // 在浏览器弹出「另存为」对话框之前触发，
   // suggest({ cancel: true }) 可以在不弹出任何浏览器下载 UI 的情况下直接取消下载。
   // Firefox 不支持此 API，完全依赖第三层兜底拦截
-  if (chrome.downloads.onDeterminingFilename) chrome.downloads.onDeterminingFilename.addListener(
+  if (browser.downloads.onDeterminingFilename) browser.downloads.onDeterminingFilename.addListener(
     (downloadItem, suggest) => {
       const url = downloadItem.url;
 
@@ -772,7 +768,7 @@ export default defineBackground(() => {
           // R5-3 修复：suggest({ cancel: true }) 后下载 ID 通常已消失，
           // erase 失败是预期行为（非错误），降级为 debug 日志避免日志噪音。
           try {
-            await chrome.downloads.erase({ id: downloadItem.id });
+            await browser.downloads.erase({ id: downloadItem.id });
           } catch {
             console.debug('[FluxDown] erase after cancel: download item already gone (expected)');
           }
@@ -806,7 +802,7 @@ export default defineBackground(() => {
   // sendResponse 被调用后响应值经常被丢弃，popup 收到 undefined。
   // 返回 Promise 是 Firefox 原生支持的正确方式，Chrome 99+（含 MV3）同样支持。
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  chrome.runtime.onMessage.addListener((message, sender, _sendResponse) => {
+  browser.runtime.onMessage.addListener((message, sender, _sendResponse) => {
     return handleMessage(message, sender).catch((_err) => ({ error: String(_err) })) as any;
   });
 
@@ -836,8 +832,8 @@ export default defineBackground(() => {
   function enqueuePending(request: DownloadRequest): Promise<void> {
     _queueChain = _queueChain.then(async () => {
       try {
-        const stored = await chrome.storage.local.get(PENDING_QUEUE_KEY);
-        const queue: PendingRequest[] = stored[PENDING_QUEUE_KEY] ?? [];
+        const stored = await browser.storage.local.get(PENDING_QUEUE_KEY);
+        const queue: PendingRequest[] = stored?.[PENDING_QUEUE_KEY] ?? [];
         // Bug 7 修复：去重以 url+filename 联合键，允许同 URL 不同文件名重试
         // 避免用户两次手动发送同一 URL 但第二次被错误去重
         const key = `${request.url}|${request.filename ?? ''}`;
@@ -846,7 +842,7 @@ export default defineBackground(() => {
         );
         if (!isDup) {
           queue.push({ request, failedAt: Date.now(), retries: 0 });
-          await chrome.storage.local.set({ [PENDING_QUEUE_KEY]: queue });
+          await browser.storage.local.set({ [PENDING_QUEUE_KEY]: queue });
           console.log('[FluxDown] Enqueued pending request:', request.url);
         }
       } catch (e) {
@@ -860,7 +856,7 @@ export default defineBackground(() => {
     _queueChain = _queueChain.then(async () => {
       let stored: Record<string, any>;
       try {
-        stored = await chrome.storage.local.get(PENDING_QUEUE_KEY);
+        stored = await browser.storage.local.get(PENDING_QUEUE_KEY);
       } catch {
         return;
       }
@@ -910,7 +906,7 @@ export default defineBackground(() => {
       }
 
       try {
-        await chrome.storage.local.set({ [PENDING_QUEUE_KEY]: remaining });
+        await browser.storage.local.set({ [PENDING_QUEUE_KEY]: remaining });
       } catch { /* ignore */ }
     });
     return _queueChain;
@@ -944,7 +940,7 @@ export default defineBackground(() => {
     if (!cookieString) {
       try {
         const cookiesResult = await Promise.race([
-          chrome.cookies.getAll({ url }),
+          browser.cookies.getAll({ url }),
           new Promise<chrome.cookies.Cookie[]>((_, reject) =>
             setTimeout(() => reject(new Error('cookies timeout')), 500),
           ),
@@ -995,7 +991,7 @@ export default defineBackground(() => {
       case 'toggleEnabled': {
         const currentSettings = await loadSettings();
         const newEnabled = !currentSettings.enabled;
-        await chrome.storage.sync.set({
+        await browser.storage.sync.set({
           settings: { ...currentSettings, enabled: newEnabled },
         });
         updateIcon(newEnabled);
@@ -1005,7 +1001,7 @@ export default defineBackground(() => {
       case 'updateSettings': {
         const currentSettings = await loadSettings();
         const merged = { ...currentSettings, ...message.settings };
-        await chrome.storage.sync.set({ settings: merged });
+        await browser.storage.sync.set({ settings: merged });
         return { success: true, settings: merged };
       }
 
@@ -1092,7 +1088,7 @@ export default defineBackground(() => {
             if (!cookieString) {
               try {
                 const cookiesResult = await Promise.race([
-                  chrome.cookies.getAll({ url: item.url }),
+                  browser.cookies.getAll({ url: item.url }),
                   new Promise<chrome.cookies.Cookie[]>((_, reject) =>
                     setTimeout(() => reject(new Error('cookies timeout')), 500),
                   ),
@@ -1124,9 +1120,9 @@ export default defineBackground(() => {
       // --- Popup: 切换资源面板显示（发消息给当前活跃 tab 的 Content Script） ---
       case 'toggleResourcePanel': {
         try {
-          const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+          const [activeTab] = await browser.tabs.query({ active: true, currentWindow: true });
           if (activeTab?.id) {
-            await chrome.tabs.sendMessage(activeTab.id, { action: 'toggleResourcePanel' });
+            await browser.tabs.sendMessage(activeTab.id, { action: 'toggleResourcePanel' });
           }
         } catch {
           // tab 可能未注入 content script
@@ -1271,11 +1267,11 @@ export default defineBackground(() => {
   }
 
   function notify(title: string, message: string) {
-    // R5-7 修复：Firefox 下 chrome.notifications 可能不存在或受权限限制，
+    // R5-7 修复：Firefox 下 notifications 可能不存在或受权限限制，
     // fire-and-forget 的未捕获 rejection 会产生控制台错误噪音。
-    if (!chrome.notifications?.create) return;
+    if (!browser.notifications?.create) return;
     try {
-      chrome.notifications.create({
+      browser.notifications.create({
         type: 'basic',
         iconUrl: '/icon/128.png',
         title: `FluxDown - ${title}`,
@@ -1294,9 +1290,7 @@ export default defineBackground(() => {
       48: `/icon/48${suffix}.png`,
       128: `/icon/128${suffix}.png`,
     };
-    // chrome.action (MV3) / chrome.browserAction (Firefox MV2)
-    const api = chrome.action ?? (chrome as any).browserAction;
-    if (api) api.setIcon({ path: iconPath });
+    browser.action?.setIcon({ path: iconPath })?.catch(() => { /* 权限不足时静默忽略 */ });
   }
 
   // 启动时更新图标（settings 已在上方 getCachedSettings 预热，此处复用缓存）

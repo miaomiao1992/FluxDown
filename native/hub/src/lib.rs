@@ -10,6 +10,7 @@ mod protocol_registry;
 mod hls_downloader;
 mod dash_downloader;
 mod native_messaging;
+mod nmh_registry;
 mod proxy_config;
 mod segment_advisor;
 mod segment_coordinator;

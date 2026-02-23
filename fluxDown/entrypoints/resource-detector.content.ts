@@ -115,7 +115,7 @@ export default defineContentScript({
         || href.startsWith('data:')
       ) return;
       if (!href.startsWith('http://') && !href.startsWith('https://') && !href.startsWith('ftp://')) return;
-      chrome.runtime.sendMessage({ action: 'addBypassToken', url: href }).catch(() => {});
+      browser.runtime.sendMessage({ action: 'addBypassToken', url: href }).catch(() => {});
     };
     document.addEventListener('mousedown', handleAltMousedown, true);
     ctx.onInvalidated(() => {
@@ -321,7 +321,7 @@ export default defineContentScript({
         }
       }
 
-      chrome.runtime.sendMessage({
+      browser.runtime.sendMessage({
         action: 'resourceDetected',
         resources: fresh,
       }).catch(() => {

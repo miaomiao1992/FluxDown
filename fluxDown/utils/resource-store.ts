@@ -5,6 +5,7 @@
  * v2 改进：URL 归一化去重、可信度分级、按可信度+时间排序。
  */
 
+import { browser } from 'wxt/browser';
 import type { DetectedResource, ResourceMessagePayload, ConfidenceLevel } from './resource-types';
 import {
   generateResourceId,
@@ -145,20 +146,14 @@ export function getTabsWithResources(): number[] {
 
 // ===== Badge 更新 =====
 
-// chrome.action (MV3) 或 chrome.browserAction (Firefox MV2)
-const actionApi: typeof chrome.action | undefined =
-  chrome.action ?? (chrome as any).browserAction;
-
 export async function updateBadgeForTab(tabId: number): Promise<void> {
-  if (!actionApi) return;
-
   const count = getResourceCountForTab(tabId);
   const text = count > 0 ? String(count) : '';
 
   try {
-    await actionApi.setBadgeText({ text, tabId });
+    await browser.action?.setBadgeText({ text, tabId });
     if (count > 0) {
-      await actionApi.setBadgeBackgroundColor({ color: '#3B82F6', tabId });
+      await browser.action?.setBadgeBackgroundColor({ color: '#3B82F6', tabId });
     }
   } catch {
     // tab 可能已关闭
@@ -204,11 +199,11 @@ function mergeResource(existing: DetectedResource, incoming: ResourceMessagePayl
 // ===== Tab 生命周期管理 =====
 
 export function initTabLifecycleListeners(): void {
-  chrome.tabs.onRemoved.addListener((tabId) => {
+  browser.tabs.onRemoved.addListener((tabId) => {
     clearResourcesForTab(tabId);
   });
 
-  chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
     if (changeInfo.status === 'loading' && changeInfo.url) {
       clearResourcesForTab(tabId);
       updateBadgeForTab(tabId);

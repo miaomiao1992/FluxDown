@@ -2,6 +2,8 @@
  * 插件设置管理模块
  */
 
+import { browser } from 'wxt/browser';
+
 /**
  * 拦截模式：
  * - 'extension': 仅按文件扩展名拦截（旧行为）
@@ -105,7 +107,7 @@ const DEFAULT_SETTINGS: FluxDownSettings = {
  * 加载设置
  */
 export async function loadSettings(): Promise<FluxDownSettings> {
-  const result = await chrome.storage.sync.get('settings') ?? {};
+  const result = await browser.storage.sync.get('settings') ?? {};
   if (result.settings) {
     return { ...DEFAULT_SETTINGS, ...result.settings };
   }
@@ -118,14 +120,14 @@ export async function loadSettings(): Promise<FluxDownSettings> {
 export async function saveSettings(settings: Partial<FluxDownSettings>): Promise<void> {
   const current = await loadSettings();
   const merged = { ...current, ...settings };
-  await chrome.storage.sync.set({ settings: merged });
+  await browser.storage.sync.set({ settings: merged });
 }
 
 /**
  * 重置设置
  */
 export async function resetSettings(): Promise<void> {
-  await chrome.storage.sync.set({ settings: DEFAULT_SETTINGS });
+  await browser.storage.sync.set({ settings: DEFAULT_SETTINGS });
 }
 
 /**
