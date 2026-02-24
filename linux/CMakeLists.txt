@@ -41,7 +41,7 @@ endif()
 # of modifying this function.
 function(APPLY_STANDARD_SETTINGS TARGET)
   target_compile_features(${TARGET} PUBLIC cxx_std_14)
-  target_compile_options(${TARGET} PRIVATE -Wall -Werror)
+  target_compile_options(${TARGET} PRIVATE -Wall -Werror -Wno-deprecated-declarations)
   target_compile_options(${TARGET} PRIVATE "$<$<NOT:$<CONFIG:Debug>>:-O3>")
   target_compile_definitions(${TARGET} PRIVATE "$<$<NOT:$<CONFIG:Debug>>:NDEBUG>")
 endfunction()
@@ -126,3 +126,48 @@ if(NOT CMAKE_BUILD_TYPE MATCHES "Debug")
   install(FILES "${AOT_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
     COMPONENT Runtime)
 endif()
+
+# === fluxdown_nmh: NMH relay binary ===
+# Build the Native Messaging Host relay binary alongside the app so that
+# nmh_registry::find_nmh_exe() always finds it next to flux_down
+# (search path #1), covering Debug / Profile / Release and CI release builds.
+set(_NMH_WORKSPACE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/..")
+
+# Match Rust profile to CMake build type so debug builds stay fast and
+# release builds are fully optimised.
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+  set(_NMH_CARGO_ARGS "-p" "fluxdown_nmh")
+  set(_NMH_PROFILE "debug")
+else()
+  set(_NMH_CARGO_ARGS "-p" "fluxdown_nmh" "--release")
+  set(_NMH_PROFILE "release")
+endif()
+
+add_custom_target(fluxdown_nmh ALL
+  COMMAND cargo build ${_NMH_CARGO_ARGS}
+  WORKING_DIRECTORY "${_NMH_WORKSPACE_DIR}"
+  COMMENT "Building fluxdown_nmh NMH relay binary (${_NMH_PROFILE})"
+  VERBATIM
+)
+add_dependencies(${BINARY_NAME} fluxdown_nmh)
+install(PROGRAMS "${_NMH_WORKSPACE_DIR}/target/${_NMH_PROFILE}/fluxdown_nmh"
+  DESTINATION "${CMAKE_INSTALL_PREFIX}"
+  COMPONENT Runtime
+)
+
+# Install application icon and .desktop file for XDG integration.
+# These allow Wayland compositors (e.g. KDE Plasma) to resolve the app icon
+# by its application ID (com.fluxdown.app) instead of showing the generic
+# Wayland logo in the taskbar.
+set(FLUTTER_PROJECT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
+install(FILES "${FLUTTER_PROJECT_ROOT}/assets/logo/fluxdown_logo.png"
+  DESTINATION "${INSTALL_BUNDLE_DATA_DIR}/icons/hicolor/256x256/apps"
+  RENAME "com.fluxdown.app.png"
+  COMPONENT Runtime)
+install(FILES "${FLUTTER_PROJECT_ROOT}/assets/logo/fluxdown_logo.svg"
+  DESTINATION "${INSTALL_BUNDLE_DATA_DIR}/icons/hicolor/scalable/apps"
+  RENAME "com.fluxdown.app.svg"
+  COMPONENT Runtime)
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/com.fluxdown.app.desktop"
+  DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
+  COMPONENT Runtime)

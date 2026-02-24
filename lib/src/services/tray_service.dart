@@ -45,7 +45,10 @@ class TrayService with TrayListener {
 
     logInfo(_tag, 'setting icon: $iconPath');
     await trayManager.setIcon(iconPath);
-    await trayManager.setToolTip('FluxDown');
+    // setToolTip is not implemented on Linux
+    if (!Platform.isLinux) {
+      await trayManager.setToolTip('FluxDown');
+    }
 
     final menu = Menu(
       items: [

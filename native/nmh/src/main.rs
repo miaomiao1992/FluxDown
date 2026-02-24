@@ -24,10 +24,13 @@ use std::time::Instant;
 /// Maximum message size: 1 MB (Chrome NMH limit).
 const MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
 
-/// Named Pipe path for communicating with the FluxDown desktop app.
+/// IPC path for communicating with the FluxDown desktop app.
+/// Windows uses a Named Pipe; Linux/macOS uses a Unix Domain Socket.
+#[cfg(windows)]
 const PIPE_NAME: &str = r"\\.\pipe\fluxdown";
 
-/// FluxDown App executable name.
+/// FluxDown App executable name (Windows only).
+#[cfg(windows)]
 const APP_EXE_NAME: &str = "flux_down.exe";
 
 /// Maximum time (ms) to wait for the App to start and create its pipe.
@@ -62,13 +65,32 @@ struct ErrorResponse {
 // Diagnostic logging (writes to %TEMP%/fluxdown_nmh.log)
 // ---------------------------------------------------------------------------
 
+/// Resolve the NMH log file path.
+fn log_path() -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var("TEMP")
+            .or_else(|_| std::env::var("TMP"))
+            .ok()
+            .map(|tmp| Path::new(&tmp).join("fluxdown_nmh.log"))
+    }
+    #[cfg(not(windows))]
+    {
+        // Prefer XDG_RUNTIME_DIR (user-private); fall back to /tmp.
+        if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
+            Some(Path::new(&dir).join("fluxdown_nmh.log"))
+        } else {
+            Some(Path::new("/tmp").join("fluxdown_nmh.log"))
+        }
+    }
+}
+
 /// Append a timestamped line to the NMH log file.
 /// Failures are silently ignored — logging must never break the relay.
 fn log(msg: &str) {
-    let Ok(tmp) = std::env::var("TEMP").or_else(|_| std::env::var("TMP")) else {
+    let Some(path) = log_path() else {
         return;
     };
-    let path = Path::new(&tmp).join("fluxdown_nmh.log");
     let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -192,25 +214,55 @@ mod pipe {
     }
 }
 
+// Non-Windows: connect to FluxDown via Unix Domain Socket.
 #[cfg(not(windows))]
 mod pipe {
-    pub struct PipeHandle;
+    use std::io::{self, Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    /// Resolve the Unix socket path that the FluxDown app is listening on.
+    /// Must match the path used in native/hub/src/native_messaging.rs.
+    fn socket_path() -> std::path::PathBuf {
+        if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
+            std::path::Path::new(&dir).join("fluxdown.sock")
+        } else {
+            std::path::Path::new("/tmp").join("fluxdown.sock")
+        }
+    }
+
+    pub struct PipeHandle {
+        stream: UnixStream,
+    }
 
     impl PipeHandle {
-        pub fn connect(_pipe_name: &str) -> Option<Self> {
-            None
+        /// Connect to the FluxDown Unix socket. Returns None if the app is not running.
+        pub fn connect(_ignored: &str) -> Option<Self> {
+            let path = socket_path();
+            let stream = UnixStream::connect(&path).ok()?;
+            Some(PipeHandle { stream })
         }
-        pub fn write_message(&self, _data: &[u8]) -> std::io::Result<()> {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "Named Pipes are Windows-only",
-            ))
+
+        pub fn write_message(&mut self, data: &[u8]) -> io::Result<()> {
+            let len = data.len() as u32;
+            self.stream.write_all(&len.to_le_bytes())?;
+            self.stream.write_all(data)?;
+            self.stream.flush()?;
+            Ok(())
         }
-        pub fn read_message(&self) -> std::io::Result<Vec<u8>> {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "Named Pipes are Windows-only",
-            ))
+
+        pub fn read_message(&mut self) -> io::Result<Vec<u8>> {
+            let mut len_buf = [0u8; 4];
+            self.stream.read_exact(&mut len_buf)?;
+            let len = u32::from_le_bytes(len_buf);
+            if len > super::MAX_MESSAGE_SIZE {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "message too large",
+                ));
+            }
+            let mut buf = vec![0u8; len as usize];
+            self.stream.read_exact(&mut buf)?;
+            Ok(buf)
         }
     }
 }
@@ -264,6 +316,37 @@ fn find_app_exe() -> Option<PathBuf> {
 
 #[cfg(not(windows))]
 fn find_app_exe() -> Option<PathBuf> {
+    // 1. Same directory as NMH binary (production deployment)
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let candidate = dir.join("flux_down");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    // 2. Flutter build output (development — flutter run / flutter build linux)
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let workspace_root = Path::new(manifest_dir)
+        .parent()
+        .and_then(|p| p.parent());
+
+    if let Some(ws) = workspace_root {
+        for profile in &["debug", "release", "profile"] {
+            let candidate = ws
+                .join("build")
+                .join("linux")
+                .join("x64")
+                .join(profile)
+                .join("bundle")
+                .join("flux_down");
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+
     None
 }
 
@@ -283,17 +366,39 @@ fn launch_app(app_exe: &Path) -> bool {
 }
 
 #[cfg(not(windows))]
-fn launch_app(_app_exe: &Path) -> bool {
-    false
+fn launch_app(app_exe: &Path) -> bool {
+    std::process::Command::new(app_exe)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .is_ok()
 }
 
-/// Try to connect to the Named Pipe. If it's unavailable, launch the App
-/// (subject to cooldown) and poll with exponential back-off until the pipe
-/// appears or the timeout is reached.
+/// Returns the IPC address string for `pipe::PipeHandle::connect()`.
+/// On Windows this is the Named Pipe path; on non-Windows the argument is
+/// ignored and the Unix socket path is resolved inside the `pipe` module.
+fn ipc_address() -> &'static str {
+    #[cfg(windows)]
+    {
+        PIPE_NAME
+    }
+    #[cfg(not(windows))]
+    {
+        // Unix socket path is computed from $XDG_RUNTIME_DIR inside pipe::PipeHandle::connect.
+        ""
+    }
+}
+
+/// Try to connect to the IPC endpoint. If unavailable, launch the App
+/// (subject to cooldown) and poll with exponential back-off until the
+/// endpoint appears or the timeout is reached.
 fn connect_with_auto_launch(last_launch: &mut Option<Instant>) -> Option<pipe::PipeHandle> {
-    // Fast path: pipe already exists (App is running)
-    if let Some(p) = pipe::PipeHandle::connect(PIPE_NAME) {
-        log("pipe connected (fast path)");
+    let addr = ipc_address();
+
+    // Fast path: App is already running.
+    if let Some(p) = pipe::PipeHandle::connect(addr) {
+        log("ipc connected (fast path)");
         return Some(p);
     }
 
@@ -328,9 +433,9 @@ fn connect_with_auto_launch(last_launch: &mut Option<Instant>) -> Option<pipe::P
     loop {
         std::thread::sleep(std::time::Duration::from_millis(interval));
 
-        if let Some(p) = pipe::PipeHandle::connect(PIPE_NAME) {
+        if let Some(p) = pipe::PipeHandle::connect(addr) {
             let elapsed = last_launch.map_or(0, |t| t.elapsed().as_millis() as u64);
-            log(&format!("pipe connected after {}ms", elapsed));
+            log(&format!("ipc connected after {}ms", elapsed));
             return Some(p);
         }
 
@@ -342,7 +447,7 @@ fn connect_with_auto_launch(last_launch: &mut Option<Instant>) -> Option<pipe::P
         interval = (interval * 2).min(1000);
     }
 
-    log("pipe connect timed out after launch");
+    log("ipc connect timed out after launch");
     None
 }
 
@@ -361,11 +466,11 @@ fn main() {
         let msg_id = parsed.as_ref().map_or(0, |m| m.msg_id);
         let is_ping = parsed.as_ref().is_ok_and(|m| m.action == "ping");
 
-        // Ensure pipe connection.
+        // Ensure IPC connection.
         // "ping" only does a direct connect (no App launch for status checks).
         if pipe.is_none() {
             pipe = if is_ping {
-                pipe::PipeHandle::connect(PIPE_NAME)
+                pipe::PipeHandle::connect(ipc_address())
             } else {
                 connect_with_auto_launch(&mut last_launch)
             };

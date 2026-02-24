@@ -54,6 +54,13 @@ static void my_application_activate(GApplication* application) {
 
   gtk_window_set_default_size(window, 1280, 720);
 
+  // Register GResource-bundled icons into GTK's default icon theme so that
+  // both X11 and Wayland compositors (including KDE Plasma) can resolve the
+  // application icon by name via the standard XDG icon-theme lookup.
+  gtk_icon_theme_add_resource_path(gtk_icon_theme_get_default(),
+                                   "/com/fluxdown/app");
+  gtk_window_set_icon_name(window, APPLICATION_ID);
+
   g_autoptr(FlDartProject) project = fl_dart_project_new();
   fl_dart_project_set_dart_entrypoint_arguments(
       project, self->dart_entrypoint_arguments);

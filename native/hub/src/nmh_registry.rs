@@ -309,7 +309,226 @@ mod inner {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+// Linux: write NMH manifest files to XDG browser directories.
+#[cfg(target_os = "linux")]
+mod inner {
+    use serde::Serialize;
+    use std::io;
+    use std::path::{Path, PathBuf};
+
+    const NMH_NAME: &str = "com.fluxdown.nmh";
+    const NMH_DESCRIPTION: &str = "FluxDown Native Messaging Host";
+    /// On Linux the binary has no .exe extension.
+    const NMH_EXE_NAME: &str = "fluxdown_nmh";
+    /// On Linux, Chromium manifest is in a Chromium-specific directory.
+    const MANIFEST_FILENAME_CHROMIUM: &str = "com.fluxdown.nmh.json";
+    /// On Linux, Firefox looks for the manifest by file name (must equal the host name).
+    /// Windows uses a registry path so can have a different filename; Linux cannot.
+    const MANIFEST_FILENAME_FIREFOX: &str = "com.fluxdown.nmh.json";
+    const CHROME_EXTENSION_ID: &str = "chrome-extension://cmkcgfjpfcjfadecjdecbdfncmligjde/";
+    const FIREFOX_EXTENSION_ID: &str = "fluxdown@fluxdown.app";
+
+    #[derive(Serialize)]
+    struct NmhManifestChromium {
+        name: String,
+        description: String,
+        path: String,
+        #[serde(rename = "type")]
+        host_type: String,
+        allowed_origins: Vec<String>,
+    }
+
+    #[derive(Serialize)]
+    struct NmhManifestFirefox {
+        name: String,
+        description: String,
+        path: String,
+        #[serde(rename = "type")]
+        host_type: String,
+        allowed_extensions: Vec<String>,
+    }
+
+    fn home_dir() -> Option<PathBuf> {
+        std::env::var("HOME").ok().map(PathBuf::from)
+    }
+
+    /// Chromium-family browser NMH manifest directories (Chrome, Chromium, Edge).
+    fn chromium_nmh_dirs() -> Vec<PathBuf> {
+        let Some(home) = home_dir() else {
+            return vec![];
+        };
+        let config = home.join(".config");
+        vec![
+            config.join("google-chrome").join("NativeMessagingHosts"),
+            config.join("chromium").join("NativeMessagingHosts"),
+            config.join("microsoft-edge").join("NativeMessagingHosts"),
+        ]
+    }
+
+    /// Firefox NMH manifest directory.
+    fn firefox_nmh_dir() -> Option<PathBuf> {
+        home_dir().map(|h| h.join(".mozilla").join("native-messaging-hosts"))
+    }
+
+    fn find_nmh_exe() -> Result<PathBuf, io::Error> {
+        // 1. Next to current exe (production deployment)
+        if let Ok(exe) = std::env::current_exe() {
+            let canonical = std::fs::canonicalize(&exe).unwrap_or(exe);
+            if let Some(dir) = canonical.parent() {
+                let candidate = dir.join(NMH_EXE_NAME);
+                if candidate.exists() {
+                    rinf::debug_print!(
+                        "[nmh_registry] found NMH exe next to app: {}",
+                        candidate.display()
+                    );
+                    return Ok(candidate);
+                }
+            }
+        }
+
+        // 2. Cargo workspace target directory (development)
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let workspace_root = Path::new(manifest_dir)
+            .parent()
+            .and_then(|p| p.parent());
+
+        if let Some(ws) = workspace_root {
+            for profile in &["debug", "release"] {
+                let candidate = ws.join("target").join(profile).join(NMH_EXE_NAME);
+                if candidate.exists() {
+                    rinf::debug_print!(
+                        "[nmh_registry] found NMH exe in cargo target: {}",
+                        candidate.display()
+                    );
+                    return Ok(candidate);
+                }
+            }
+        }
+
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "{} not found. Build it with: cargo build -p fluxdown_nmh",
+                NMH_EXE_NAME
+            ),
+        ))
+    }
+
+    fn write_chromium_manifest(nmh_exe: &Path, dir: &Path) -> Result<PathBuf, io::Error> {
+        std::fs::create_dir_all(dir)?;
+        let manifest = NmhManifestChromium {
+            name: NMH_NAME.to_string(),
+            description: NMH_DESCRIPTION.to_string(),
+            path: nmh_exe.to_string_lossy().into_owned(),
+            host_type: "stdio".to_string(),
+            allowed_origins: vec![CHROME_EXTENSION_ID.to_string()],
+        };
+        let json = serde_json::to_string_pretty(&manifest)
+            .map_err(|e| io::Error::other(format!("JSON error: {}", e)))?;
+        let path = dir.join(MANIFEST_FILENAME_CHROMIUM);
+        std::fs::write(&path, json)?;
+        Ok(path)
+    }
+
+    fn write_firefox_manifest(nmh_exe: &Path, dir: &Path) -> Result<PathBuf, io::Error> {
+        std::fs::create_dir_all(dir)?;
+        let manifest = NmhManifestFirefox {
+            name: NMH_NAME.to_string(),
+            description: NMH_DESCRIPTION.to_string(),
+            path: nmh_exe.to_string_lossy().into_owned(),
+            host_type: "stdio".to_string(),
+            allowed_extensions: vec![FIREFOX_EXTENSION_ID.to_string()],
+        };
+        let json = serde_json::to_string_pretty(&manifest)
+            .map_err(|e| io::Error::other(format!("JSON error: {}", e)))?;
+        let path = dir.join(MANIFEST_FILENAME_FIREFOX);
+        std::fs::write(&path, json)?;
+        Ok(path)
+    }
+
+    pub fn needs_update() -> bool {
+        let Ok(nmh_exe) = find_nmh_exe() else {
+            return true;
+        };
+        let expected = nmh_exe.to_string_lossy().into_owned();
+
+        // At least one Chromium dir must have a valid manifest.
+        let chromium_ok = chromium_nmh_dirs().iter().any(|dir| {
+            let path = dir.join(MANIFEST_FILENAME_CHROMIUM);
+            std::fs::read_to_string(path)
+                .map(|c| c.contains(&expected))
+                .unwrap_or(false)
+        });
+
+        // Firefox manifest must exist and reference the current exe.
+        let firefox_ok = firefox_nmh_dir()
+            .map(|dir| {
+                let path = dir.join(MANIFEST_FILENAME_FIREFOX);
+                std::fs::read_to_string(path)
+                    .map(|c| c.contains(&expected))
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+
+        !(chromium_ok && firefox_ok)
+    }
+
+    pub fn register() -> Result<(), io::Error> {
+        let nmh_exe = find_nmh_exe()?;
+
+        for dir in chromium_nmh_dirs() {
+            match write_chromium_manifest(&nmh_exe, &dir) {
+                Ok(path) => {
+                    rinf::debug_print!(
+                        "[nmh_registry] Chromium manifest: {}",
+                        path.display()
+                    );
+                }
+                Err(e) => {
+                    rinf::debug_print!(
+                        "[nmh_registry] Chromium manifest error ({}): {}",
+                        dir.display(),
+                        e
+                    );
+                }
+            }
+        }
+
+        if let Some(dir) = firefox_nmh_dir() {
+            match write_firefox_manifest(&nmh_exe, &dir) {
+                Ok(path) => {
+                    rinf::debug_print!(
+                        "[nmh_registry] Firefox manifest: {}",
+                        path.display()
+                    );
+                }
+                Err(e) => {
+                    rinf::debug_print!("[nmh_registry] Firefox manifest error: {}", e);
+                }
+            }
+        }
+
+        rinf::debug_print!(
+            "[nmh_registry] NMH registered: exe={}",
+            nmh_exe.display()
+        );
+        Ok(())
+    }
+
+    pub fn unregister() -> Result<(), io::Error> {
+        for dir in chromium_nmh_dirs() {
+            let _ = std::fs::remove_file(dir.join(MANIFEST_FILENAME_CHROMIUM));
+        }
+        if let Some(dir) = firefox_nmh_dir() {
+            let _ = std::fs::remove_file(dir.join(MANIFEST_FILENAME_FIREFOX));
+        }
+        rinf::debug_print!("[nmh_registry] NMH registration removed");
+        Ok(())
+    }
+}
+
+// All other non-Windows, non-Linux platforms (macOS, etc.) — no-op.
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 mod inner {
     use std::io;
 

@@ -252,16 +252,175 @@ mod server {
     }
 }
 
-// Non-Windows stub — Named Pipes are Windows-only.
+// Non-Windows: Unix Domain Socket server.
 #[cfg(not(windows))]
 mod server {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::UnixListener;
     use tokio::sync::mpsc;
 
-    use super::DownloadRequest;
+    use super::{DownloadRequest, PipeMessage, PipeResponse, MAX_MESSAGE_SIZE};
+
+    /// Returns the Unix socket path for the NMH relay to connect to.
+    /// Prefer $XDG_RUNTIME_DIR (user-private, cleaned on logout) over /tmp.
+    pub fn socket_path() -> std::path::PathBuf {
+        if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
+            std::path::Path::new(&dir).join("fluxdown.sock")
+        } else {
+            std::path::Path::new("/tmp").join("fluxdown.sock")
+        }
+    }
+
+    async fn read_framed_message(
+        stream: &mut tokio::net::UnixStream,
+    ) -> Result<Vec<u8>, std::io::Error> {
+        let mut len_buf = [0u8; 4];
+        stream.read_exact(&mut len_buf).await?;
+        let len = u32::from_le_bytes(len_buf);
+        if len == 0 || len > MAX_MESSAGE_SIZE {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid message length: {}", len),
+            ));
+        }
+        let mut buf = vec![0u8; len as usize];
+        stream.read_exact(&mut buf).await?;
+        Ok(buf)
+    }
+
+    async fn write_framed_message(
+        stream: &mut tokio::net::UnixStream,
+        data: &[u8],
+    ) -> Result<(), std::io::Error> {
+        let len = data.len() as u32;
+        stream.write_all(&len.to_le_bytes()).await?;
+        stream.write_all(data).await?;
+        stream.flush().await?;
+        Ok(())
+    }
+
+    async fn handle_client(mut stream: tokio::net::UnixStream, tx: mpsc::Sender<DownloadRequest>) {
+        loop {
+            let raw = match read_framed_message(&mut stream).await {
+                Ok(data) => data,
+                Err(e) => {
+                    rinf::debug_print!("[nmh-uds] read error: {}", e);
+                    break;
+                }
+            };
+
+            let msg: PipeMessage = match serde_json::from_slice(&raw) {
+                Ok(m) => m,
+                Err(e) => {
+                    rinf::debug_print!("[nmh-uds] JSON parse error: {}", e);
+                    let resp = PipeResponse {
+                        success: false,
+                        message: Some(format!("invalid JSON: {}", e)),
+                        msg_id: 0,
+                    };
+                    if let Ok(json) = serde_json::to_vec(&resp)
+                        && write_framed_message(&mut stream, &json).await.is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
+            };
+
+            let response = match msg.action.as_str() {
+                "ping" => {
+                    rinf::debug_print!("[nmh-uds] ping (msg_id={})", msg.msg_id);
+                    PipeResponse {
+                        success: true,
+                        message: Some("pong".to_string()),
+                        msg_id: msg.msg_id,
+                    }
+                }
+                "download" => match serde_json::from_value::<DownloadRequest>(msg.payload) {
+                    Ok(download_req) => {
+                        rinf::debug_print!(
+                            "[nmh-uds] download request (msg_id={}): url={}",
+                            msg.msg_id,
+                            download_req.url
+                        );
+                        let _ = tx.send(download_req).await;
+                        PipeResponse {
+                            success: true,
+                            message: Some("download accepted".to_string()),
+                            msg_id: msg.msg_id,
+                        }
+                    }
+                    Err(e) => {
+                        rinf::debug_print!(
+                            "[nmh-uds] download parse error (msg_id={}): {}",
+                            msg.msg_id,
+                            e
+                        );
+                        PipeResponse {
+                            success: false,
+                            message: Some(format!("invalid download payload: {}", e)),
+                            msg_id: msg.msg_id,
+                        }
+                    }
+                },
+                other => {
+                    rinf::debug_print!(
+                        "[nmh-uds] unknown action '{}' (msg_id={})",
+                        other,
+                        msg.msg_id
+                    );
+                    PipeResponse {
+                        success: false,
+                        message: Some(format!("unknown action: {}", other)),
+                        msg_id: msg.msg_id,
+                    }
+                }
+            };
+
+            if let Ok(json) = serde_json::to_vec(&response)
+                && write_framed_message(&mut stream, &json).await.is_err()
+            {
+                break;
+            }
+        }
+    }
 
     pub fn spawn_listener() -> mpsc::Receiver<DownloadRequest> {
-        let (_tx, rx) = mpsc::channel::<DownloadRequest>(1);
-        rinf::debug_print!("[nmh-pipe] Named Pipe server is Windows-only, skipping");
+        let (tx, rx) = mpsc::channel::<DownloadRequest>(64);
+        let sock_path = socket_path();
+
+        tokio::spawn(async move {
+            // Remove stale socket file left by a previous run.
+            let _ = std::fs::remove_file(&sock_path);
+
+            let listener = match UnixListener::bind(&sock_path) {
+                Ok(l) => {
+                    rinf::debug_print!(
+                        "[nmh-uds] Unix socket server started at {}",
+                        sock_path.display()
+                    );
+                    l
+                }
+                Err(e) => {
+                    rinf::debug_print!("[nmh-uds] failed to bind Unix socket: {}", e);
+                    return;
+                }
+            };
+
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _)) => {
+                        rinf::debug_print!("[nmh-uds] client connected");
+                        let tx_clone = tx.clone();
+                        tokio::spawn(handle_client(stream, tx_clone));
+                    }
+                    Err(e) => {
+                        rinf::debug_print!("[nmh-uds] accept error: {}", e);
+                    }
+                }
+            }
+        });
+
         rx
     }
 }
