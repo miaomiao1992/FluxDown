@@ -834,11 +834,15 @@ async fn run_hls_download_inner(
             }
             Err(e) => {
                 rinf::debug_print!(
-                    "[hls] task {} DB update failed after remux: {}, orphan mp4 at {}",
+                    "[hls] task {} DB update failed after remux: {}, removing orphan mp4 at {}",
                     p.task_id,
                     e,
                     mp4_path.display()
                 );
+                // DB update failed: the task record still points to the .ts file name.
+                // delete_task uses the DB file_name to locate files, so the .mp4
+                // would never be cleaned up. Remove it now to prevent a disk leak.
+                let _ = tokio::fs::remove_file(&mp4_path).await;
             }
         }
     }

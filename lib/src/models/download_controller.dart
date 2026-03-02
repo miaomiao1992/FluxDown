@@ -401,12 +401,14 @@ class DownloadController extends ChangeNotifier {
       _tag,
       'deleteCheckedTasks: ${ids.length} tasks, deleteFiles=$deleteFiles',
     );
-    // 超过阈值时启用进度追踪，等待 Rust 逐个发回删除确认信号
+    // 超过阈值时启用进度追踪，等待 Rust 逐个发回删除确认信号。
+    // 若已有批量删除进行中（_pendingDeleteIds 非空），无论新批次大小都并入追踪，
+    // 避免第二批次使 _batchDeleteTotal 仅反映新批次数量而漏计已挂起的任务。
     const _progressThreshold = 20;
-    if (ids.length >= _progressThreshold) {
+    if (ids.length >= _progressThreshold || _pendingDeleteIds.isNotEmpty) {
       _pendingDeleteIds.addAll(ids);
-      _batchDeleteDone = 0;
-      _batchDeleteTotal = ids.length;
+      // 不重置 _batchDeleteDone：total = 已确认 + 当前所有挂起，保证进度不超过 1.0。
+      _batchDeleteTotal = _batchDeleteDone + _pendingDeleteIds.length;
     }
     for (final id in ids) {
       _optimisticPausedIds.remove(id);
@@ -833,9 +835,26 @@ class DownloadController extends ChangeNotifier {
     }
     final incoming = pack.message.tasks;
     logInfo(_tag, '_onAllTasks: received ${incoming.length} tasks');
-    _deletedTaskIds.clear(); // 全量刷新后旧的删除标记不再需要
+
+    // Rust 每次创建任务后都会推送 AllTasks（download_actor.rs:230/244/390），
+    // 不只是在启动时。若此时批量删除进行中，不能无条件清空 _deletedTaskIds：
+    //
+    //   1. _pendingDeleteIds 里的 ID 仍在等待 Rust 的删除确认；若守卫被清除，
+    //      后续到来的确认信号会落入普通 _onProgress 路径，任务以 error 状态
+    //      被「僵尸复活」到列表，且 _pendingDeleteIds 永远无法清空。
+    //   2. Rust DB 中还没来得及删除的任务仍在 AllTasks 里，需保留守卫以防止
+    //      _onAllTasks 本身把它们重新加回 _tasks（二次僵尸复活）。
+    //
+    // 修复：只移除已被 Rust 确认彻底删除（不在 DB 中）且不在批量追踪中的 ID。
+    final incomingIds = {for (final t in incoming) t.taskId};
+    _deletedTaskIds.removeWhere(
+      (id) => !incomingIds.contains(id) && !_pendingDeleteIds.contains(id),
+    );
+
     _tasks.clear();
     for (final info in incoming) {
+      // 跳过仍在删除中的任务，防止 AllTasks 把它们重新插回列表（僵尸复活）。
+      if (_deletedTaskIds.contains(info.taskId)) continue;
       var task = DownloadTask.fromTaskInfo(info);
       // 若用户已乐观暂停该任务，DB 的旧状态（downloading/resuming 等）不得覆盖 UI。
       // 避免 AllTasks 到达时 DB 尚未写入 paused，导致任务被还原成下载中，
@@ -860,7 +879,8 @@ class DownloadController extends ChangeNotifier {
           p.errorMessage == 'deleted') {
         _pendingDeleteIds.remove(p.taskId);
         _batchDeleteDone++;
-        if (_pendingDeleteIds.isEmpty) {
+        final isDone = _pendingDeleteIds.isEmpty;
+        if (isDone) {
           // 全部删除完成，重置计数（保留 total 供 UI 短暂显示最终值）
           Future.delayed(const Duration(milliseconds: 800), () {
             if (!_disposed) {
@@ -870,7 +890,12 @@ class DownloadController extends ChangeNotifier {
             }
           });
         }
-        _safeNotifyListeners();
+        // 上万级删除时每次确认都重绘开销过大：按 ~1% 步长节流，完成时强制刷新。
+        // step = max(1, total / 100)，保证最多触发 ~100 次重建，与批次大小无关。
+        final step = (_batchDeleteTotal / 100).ceil().clamp(1, _batchDeleteTotal);
+        if (isDone || _batchDeleteDone % step == 0) {
+          _safeNotifyListeners();
+        }
       }
       return;
     }

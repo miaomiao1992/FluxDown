@@ -582,6 +582,13 @@ fn socks5_handshake(
     }
 
     // Step 3: CONNECT request
+    // RFC 1928 §5: DOMAINNAME field is also one byte length.
+    if target_host.len() > 255 {
+        return Err(DownloadError::Other(format!(
+            "SOCKS5 target hostname too long: {} bytes (max 255)",
+            target_host.len()
+        )));
+    }
     let mut connect_req = vec![
         0x05, // VER
         0x01, // CMD = CONNECT
@@ -677,6 +684,20 @@ fn socks5_auth(
     password: &str,
 ) -> Result<(), DownloadError> {
     use std::io::{Read, Write};
+
+    // RFC 1929 §2: both username and password must fit in one byte length field.
+    if username.len() > 255 {
+        return Err(DownloadError::Other(format!(
+            "SOCKS5 username must be ≤ 255 bytes, got {}",
+            username.len()
+        )));
+    }
+    if password.len() > 255 {
+        return Err(DownloadError::Other(format!(
+            "SOCKS5 password must be ≤ 255 bytes, got {}",
+            password.len()
+        )));
+    }
 
     let mut auth_req = vec![0x01]; // VER = 1
     auth_req.push(username.len() as u8);

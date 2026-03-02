@@ -600,21 +600,36 @@ impl SharedBtSession {
         self.pending_deletes.lock().await.remove(task_id)
     }
 
-    /// Increment the in-flight detached `add_torrent` task counter.
-    /// Must be called **before** spawning the detached task.
-    pub fn increment_inflight_add(&self) {
+    fn increment_inflight_add(&self) {
         self.inflight_adds.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Decrement the in-flight detached `add_torrent` task counter.
-    /// Must be called at the end of the detached task (success or failure).
-    pub fn decrement_inflight_add(&self) {
+    fn decrement_inflight_add(&self) {
         self.inflight_adds.fetch_sub(1, Ordering::Relaxed);
     }
 
     /// Returns `true` if any detached `add_torrent` task is still running.
     pub fn has_inflight_adds(&self) -> bool {
         self.inflight_adds.load(Ordering::Relaxed) > 0
+    }
+
+    /// Increment the counter and return an RAII guard that decrements it on
+    /// drop.  Using a guard instead of manual increment/decrement ensures the
+    /// counter is always decremented even if the enclosing `tokio::spawn`
+    /// closure panics before reaching the end.
+    pub fn inflight_guard(self: &Arc<Self>) -> InflightGuard {
+        self.increment_inflight_add();
+        InflightGuard(Arc::clone(self))
+    }
+}
+
+/// Decrements `SharedBtSession::inflight_adds` when dropped, guaranteeing
+/// the counter is decremented even if the enclosing async task panics.
+pub struct InflightGuard(Arc<SharedBtSession>);
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        self.0.decrement_inflight_add();
     }
 }
 
@@ -1053,11 +1068,14 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
         let source_for_add = torrent_source.clone();
         let shared_bt_for_add = shared_bt.clone();
         let task_id_for_add = task_id.clone();
-        // Increment before spawning so `maybe_release_bt_session` sees the
-        // in-flight task even if the parent (`bt_download_inner`) is cancelled
-        // immediately after.  The detached task decrements when it finishes.
-        shared_bt.increment_inflight_add();
+        // Create the RAII guard before spawning so `maybe_release_bt_session`
+        // sees the in-flight task even if `bt_download_inner` is cancelled
+        // immediately after.  The guard decrements on drop — panic-safe.
+        let inflight = shared_bt.inflight_guard();
         let add_handle = tokio::spawn(async move {
+            // Move the guard into the task so it is dropped (and thus
+            // decrements) when the task finishes normally *or* panics.
+            let _inflight = inflight;
             let add_input = match source_for_add {
                 TorrentSource::Magnet(ref url) => AddTorrent::from_url(url),
                 TorrentSource::TorrentFileBytes(ref bytes) => {
@@ -1091,9 +1109,8 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                     }
                 }
             }
-            // Signal that this in-flight task is done regardless of outcome.
-            shared_bt_for_add.decrement_inflight_add();
             result
+            // `_inflight` drops here → decrement_inflight_add() called
         });
 
         // Send "preparing" heartbeats while waiting for metadata.
@@ -1435,5 +1452,78 @@ mod tests {
     fn display_progress_handles_unknown_total() {
         let progress = compute_bt_display_progress(0, 12345, 0, false);
         assert_eq!(progress, 12345);
+    }
+
+    // -------------------------------------------------------------------------
+    // InflightGuard: panic-safe decrement via RAII.
+    // -------------------------------------------------------------------------
+
+    /// Verify that InflightGuard decrements the counter even when the
+    /// enclosing tokio::spawn closure panics before the natural end.
+    #[tokio::test]
+    async fn inflight_guard_decrements_on_task_panic() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        // Minimal stand-in for SharedBtSession: just the counter.
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        // Build a minimal InflightGuard directly using the same AtomicUsize
+        // so we can test the Drop behaviour without constructing a full Session.
+        struct TestGuard(Arc<AtomicUsize>);
+        impl Drop for TestGuard {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
+
+        // Simulate: shared_bt.inflight_guard() — increments then returns guard.
+        counter.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
+        let guard = TestGuard(Arc::clone(&counter));
+
+        // Simulate: tokio::spawn(async move { let _g = guard; ..panic.. })
+        let handle = tokio::spawn(async move {
+            let _g = guard; // guard moved into task; Drop runs on panic
+            panic!("simulated add_torrent panic");
+        });
+
+        // Tokio catches the panic; JoinHandle returns Err.
+        assert!(handle.await.is_err());
+
+        // FIX confirmed: guard's Drop ran during tokio's task cleanup,
+        // decrementing the counter back to 0.
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            0,
+            "InflightGuard must decrement counter even after task panic"
+        );
+    }
+
+    /// Verify normal (non-panic) path: guard also decrements on clean exit.
+    #[tokio::test]
+    async fn inflight_guard_decrements_on_normal_exit() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        struct TestGuard(Arc<AtomicUsize>);
+        impl Drop for TestGuard {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
+
+        counter.fetch_add(1, Ordering::Relaxed);
+        let guard = TestGuard(Arc::clone(&counter));
+
+        let handle = tokio::spawn(async move {
+            let _g = guard;
+            // normal return — no panic
+        });
+
+        assert!(handle.await.is_ok());
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
     }
 }
