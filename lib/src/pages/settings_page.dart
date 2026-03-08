@@ -2242,30 +2242,43 @@ class _ThemeActions extends StatelessWidget {
       type: FileType.custom,
       allowedExtensions: ['json'],
       dialogTitle: s.themeImport,
+      allowMultiple: true,
     );
     if (result == null || result.files.isEmpty) return;
-    final path = result.files.single.path;
-    if (path == null) return;
 
-    try {
-      final file = File(path);
-      final content = await file.readAsString();
-      final tokens = provider.importThemeJson(content);
-      provider.addImportedTheme(tokens);
+    int successCount = 0;
+    final errors = <String>[];
 
-      if (!context.mounted) return;
+    for (final picked in result.files) {
+      final path = picked.path;
+      if (path == null) continue;
+
+      try {
+        final file = File(path);
+        final content = await file.readAsString();
+        final tokens = provider.importThemeJson(content);
+        provider.addImportedTheme(tokens);
+        successCount++;
+      } catch (e) {
+        errors.add('${picked.name}: $e');
+      }
+    }
+
+    if (!context.mounted) return;
+
+    if (successCount > 0) {
       ShadSonner.of(context).show(
         ShadToast(
-          title: Text(s.themeImportSuccess),
+          title: Text('${s.themeImportSuccess} ($successCount)'),
           duration: const Duration(seconds: 2),
         ),
       );
-    } catch (e) {
-      if (!context.mounted) return;
+    }
+    if (errors.isNotEmpty) {
       ShadSonner.of(context).show(
         ShadToast.destructive(
           title: Text(s.themeImportError),
-          description: Text(e.toString()),
+          description: Text(errors.join('\n')),
           duration: const Duration(seconds: 3),
         ),
       );

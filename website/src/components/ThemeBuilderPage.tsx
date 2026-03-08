@@ -1313,16 +1313,6 @@ function PreviewPanel({
         </div>
       </div>
 
-      <div className="mt-2 flex gap-2 text-[10px] text-dark-text-muted">
-        <div className="flex-1 rounded-lg border border-dark-border/60 bg-dark-surface2/30 px-3 py-1.5 backdrop-blur-sm">
-          <span className="font-semibold text-dark-text-secondary">{t("tb.compat.title")}</span>
-          <span className="ml-1.5">{t("tb.compat.desc")}</span>
-        </div>
-        <div className="flex-1 rounded-lg border border-dark-border/60 bg-dark-surface2/30 px-3 py-1.5 backdrop-blur-sm">
-          <span className="font-semibold text-dark-text-secondary">{t("tb.rightClickHint")}</span>
-          <span className="ml-1.5">{t("tb.rightClickDesc")}</span>
-        </div>
-      </div>
     </div>
   );
 }
