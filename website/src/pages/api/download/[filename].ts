@@ -1,18 +1,18 @@
 /**
- * GET /api/download/:filename
+ * GET /api/download/:filename?tag=v1.2.3
  *
  * 代理下载私有仓库的 Release 资产。
- * 流程：查找最新 Release 中匹配的 asset → 用 token 获取下载 URL → 302 重定向。
+ * - 若提供 ?tag= 参数，则在对应 tag 的 release 中查找 asset
+ * - 若不提供 tag，则在最新的正式 release 中查找 asset
  *
- * 这样用户的浏览器直接从 GitHub CDN 下载，不经过 Vercel serverless 中转流量。
+ * 流程：定位目标 Release → 找到匹配 asset → 用 token 获取带签名的 CDN URL → 302 重定向
+ * 用户浏览器直接从 GitHub CDN 下载，不经过 Vercel serverless 中转流量。
  */
 
 import type { APIRoute } from "astro";
+import { GITHUB_TOKEN, GITHUB_REPO } from "astro:env/server";
 
 export const prerender = false;
-
-const GITHUB_REPO = process.env.GITHUB_REPO || "user/x_down";
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN || "";
 
 interface GitHubAsset {
   name: string;
@@ -21,12 +21,74 @@ interface GitHubAsset {
 }
 
 interface GitHubRelease {
+  tag_name: string;
   draft: boolean;
   prerelease: boolean;
   assets: GitHubAsset[];
 }
 
-export const GET: APIRoute = async ({ params }) => {
+const GITHUB_HEADERS = {
+  Authorization: `Bearer ${GITHUB_TOKEN}`,
+  Accept: "application/vnd.github+json",
+  "X-GitHub-Api-Version": "2022-11-28",
+};
+
+/**
+ * 通过 tag 名称获取指定 release。
+ * GitHub API: GET /repos/{owner}/{repo}/releases/tags/{tag}
+ */
+async function fetchReleaseByTag(tag: string): Promise<GitHubRelease | null> {
+  const res = await fetch(
+    `https://api.github.com/repos/${GITHUB_REPO}/releases/tags/${encodeURIComponent(tag)}`,
+    { headers: GITHUB_HEADERS },
+  );
+
+  if (res.status === 404) return null;
+
+  if (!res.ok) {
+    throw new Error(`GitHub API error ${res.status}: ${await res.text()}`);
+  }
+
+  return res.json() as Promise<GitHubRelease>;
+}
+
+/**
+ * 获取最新正式 release（非 draft、非 prerelease）。
+ * 拉取前几页后取第一个符合条件的即可，无需全量拉取。
+ */
+async function fetchLatestRelease(): Promise<GitHubRelease | null> {
+  const res = await fetch(
+    `https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=10`,
+    { headers: GITHUB_HEADERS },
+  );
+
+  if (!res.ok) {
+    throw new Error(`GitHub API error ${res.status}: ${await res.text()}`);
+  }
+
+  const releases: GitHubRelease[] = await res.json();
+  return releases.find((r) => !r.draft && !r.prerelease) ?? null;
+}
+
+/**
+ * 通过 GitHub Asset API URL 获取带签名的 CDN 下载地址。
+ * GitHub 会返回 302，Location 即为有效期约 10 分钟的临时 CDN URL。
+ */
+async function resolveAssetDownloadUrl(
+  assetApiUrl: string,
+): Promise<string | null> {
+  const res = await fetch(assetApiUrl, {
+    headers: {
+      ...GITHUB_HEADERS,
+      Accept: "application/octet-stream",
+    },
+    redirect: "manual", // 捕获 302，不自动跟随
+  });
+
+  return res.headers.get("Location");
+}
+
+export const GET: APIRoute = async ({ params, url }) => {
   const { filename } = params;
 
   if (!filename) {
@@ -43,66 +105,62 @@ export const GET: APIRoute = async ({ params }) => {
     );
   }
 
+  const tag = url.searchParams.get("tag")?.trim() || "";
+
   try {
-    // 获取最新 Release
-    const res = await fetch(
-      `https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=5`,
-      {
-        headers: {
-          Authorization: `Bearer ${GITHUB_TOKEN}`,
-          Accept: "application/vnd.github+json",
-          "X-GitHub-Api-Version": "2022-11-28",
-        },
-      },
-    );
+    // ── 1. 定位目标 Release ──
+    let release: GitHubRelease | null;
 
-    if (!res.ok) {
-      return new Response(
-        JSON.stringify({ error: `GitHub API error: ${res.status}` }),
-        { status: 502, headers: { "Content-Type": "application/json" } },
-      );
+    if (tag) {
+      release = await fetchReleaseByTag(tag);
+      if (!release) {
+        return new Response(
+          JSON.stringify({ error: `Release "${tag}" not found` }),
+          { status: 404, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      // 拒绝下载草稿或预发布版本中的 asset
+      if (release.draft || release.prerelease) {
+        return new Response(
+          JSON.stringify({
+            error: `Release "${tag}" is not a published release`,
+          }),
+          { status: 403, headers: { "Content-Type": "application/json" } },
+        );
+      }
+    } else {
+      release = await fetchLatestRelease();
+      if (!release) {
+        return new Response(
+          JSON.stringify({ error: "No published release found" }),
+          { status: 404, headers: { "Content-Type": "application/json" } },
+        );
+      }
     }
 
-    const releases: GitHubRelease[] = await res.json();
-    const latest = releases.find((r) => !r.draft && !r.prerelease);
-
-    if (!latest) {
-      return new Response(
-        JSON.stringify({ error: "No published release found" }),
-        { status: 404, headers: { "Content-Type": "application/json" } },
-      );
-    }
-
-    // 查找匹配的 asset
-    const asset = latest.assets.find((a) => a.name === filename);
+    // ── 2. 在 release 中查找对应 asset ──
+    const asset = release.assets.find((a) => a.name === filename);
 
     if (!asset) {
       return new Response(
-        JSON.stringify({ error: `Asset "${filename}" not found in latest release` }),
+        JSON.stringify({
+          error: `Asset "${filename}" not found in release "${release.tag_name}"`,
+        }),
         { status: 404, headers: { "Content-Type": "application/json" } },
       );
     }
 
-    // 通过 GitHub API 获取 asset 的实际下载 URL（带临时 token 的 CDN 链接）
-    const assetRes = await fetch(asset.url, {
-      headers: {
-        Authorization: `Bearer ${GITHUB_TOKEN}`,
-        Accept: "application/octet-stream",
-      },
-      redirect: "manual", // 不自动跟随重定向，捕获 302 的 Location
-    });
-
-    const downloadUrl = assetRes.headers.get("Location");
+    // ── 3. 解析带签名的 CDN 下载 URL ──
+    const downloadUrl = await resolveAssetDownloadUrl(asset.url);
 
     if (!downloadUrl) {
-      // 如果没有重定向（不太可能），回退到流式代理
       return new Response(
         JSON.stringify({ error: "Failed to get download URL from GitHub" }),
         { status: 502, headers: { "Content-Type": "application/json" } },
       );
     }
 
-    // 302 重定向到 GitHub CDN 的临时签名 URL（该 URL 自带认证，有效期约 10 分钟）
+    // ── 4. 302 重定向到 GitHub CDN 临时签名 URL ──
     return new Response(null, {
       status: 302,
       headers: {

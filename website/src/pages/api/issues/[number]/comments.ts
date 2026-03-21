@@ -15,11 +15,9 @@
  */
 
 import type { APIRoute } from "astro";
+import { GITHUB_TOKEN, GITHUB_REPO } from "astro:env/server";
 
 export const prerender = false;
-
-const GITHUB_REPO = process.env.GITHUB_REPO || "user/x_down";
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN || "";
 
 // ── Rate Limit ──
 
@@ -72,18 +70,18 @@ export const POST: APIRoute = async ({ params, request, clientAddress }) => {
   // 验证 issue number
   const numberStr = params.number;
   if (!numberStr) {
-    return new Response(
-      JSON.stringify({ error: "Missing issue number" }),
-      { status: 400, headers: { "Content-Type": "application/json" } },
-    );
+    return new Response(JSON.stringify({ error: "Missing issue number" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
   const issueNumber = parseInt(numberStr, 10);
   if (isNaN(issueNumber) || issueNumber <= 0) {
-    return new Response(
-      JSON.stringify({ error: "Invalid issue number" }),
-      { status: 400, headers: { "Content-Type": "application/json" } },
-    );
+    return new Response(JSON.stringify({ error: "Invalid issue number" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
   // 解析请求体
@@ -92,10 +90,10 @@ export const POST: APIRoute = async ({ params, request, clientAddress }) => {
   try {
     payload = await request.json();
   } catch {
-    return new Response(
-      JSON.stringify({ error: "Invalid JSON body" }),
-      { status: 400, headers: { "Content-Type": "application/json" } },
-    );
+    return new Response(JSON.stringify({ error: "Invalid JSON body" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
   const { body } = payload;
@@ -145,19 +143,19 @@ export const POST: APIRoute = async ({ params, request, clientAddress }) => {
     );
 
     if (res.status === 404) {
-      return new Response(
-        JSON.stringify({ error: "Issue not found" }),
-        { status: 404, headers: { "Content-Type": "application/json" } },
-      );
+      return new Response(JSON.stringify({ error: "Issue not found" }), {
+        status: 404,
+        headers: { "Content-Type": "application/json" },
+      });
     }
 
     if (!res.ok) {
       const text = await res.text();
       console.error(`GitHub API error: ${res.status}`, text);
-      return new Response(
-        JSON.stringify({ error: "Failed to submit reply" }),
-        { status: 502, headers: { "Content-Type": "application/json" } },
-      );
+      return new Response(JSON.stringify({ error: "Failed to submit reply" }), {
+        status: 502,
+        headers: { "Content-Type": "application/json" },
+      });
     }
 
     const comment = await res.json();
@@ -175,9 +173,9 @@ export const POST: APIRoute = async ({ params, request, clientAddress }) => {
     );
   } catch (err) {
     console.error("Failed to create comment:", err);
-    return new Response(
-      JSON.stringify({ error: "Internal server error" }),
-      { status: 500, headers: { "Content-Type": "application/json" } },
-    );
+    return new Response(JSON.stringify({ error: "Internal server error" }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 };

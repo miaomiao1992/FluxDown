@@ -18,17 +18,15 @@
  */
 
 import type { APIRoute } from "astro";
+import { GITHUB_TOKEN, GITHUB_REPO } from "astro:env/server";
 
 export const prerender = false;
-
-const GITHUB_REPO = process.env.GITHUB_REPO || "user/x_down";
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN || "";
 
 // ---------- Rate Limit（内存，Vercel Serverless 冷启动后重置） ----------
 
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
 const RATE_LIMIT_WINDOW = 60_000; // 1 分钟
-const RATE_LIMIT_MAX = 3;         // 每窗口最多 3 次
+const RATE_LIMIT_MAX = 3; // 每窗口最多 3 次
 
 function isRateLimited(ip: string): boolean {
   const now = Date.now();
@@ -60,9 +58,9 @@ const TYPE_LABELS: Record<string, string> = {
 };
 
 const TYPE_EMOJI: Record<string, string> = {
-  feature: "\u2728",  // ✨
-  bug: "\uD83D\uDC1B",         // 🐛
-  other: "\uD83D\uDCAC",       // 💬
+  feature: "\u2728", // ✨
+  bug: "\uD83D\uDC1B", // 🐛
+  other: "\uD83D\uDCAC", // 💬
 };
 
 // ---------- Handler ----------
@@ -98,10 +96,10 @@ export const POST: APIRoute = async ({ request, clientAddress }) => {
   try {
     body = await request.json();
   } catch {
-    return new Response(
-      JSON.stringify({ error: "Invalid JSON body" }),
-      { status: 400, headers: { "Content-Type": "application/json" } },
-    );
+    return new Response(JSON.stringify({ error: "Invalid JSON body" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
   const { type, title, description, contact } = body;
@@ -109,7 +107,9 @@ export const POST: APIRoute = async ({ request, clientAddress }) => {
   // 验证必填字段
   if (!type || !title || !description) {
     return new Response(
-      JSON.stringify({ error: "Missing required fields: type, title, description" }),
+      JSON.stringify({
+        error: "Missing required fields: type, title, description",
+      }),
       { status: 400, headers: { "Content-Type": "application/json" } },
     );
   }
@@ -117,7 +117,9 @@ export const POST: APIRoute = async ({ request, clientAddress }) => {
   // 验证 type 取值
   if (!["feature", "bug", "other"].includes(type)) {
     return new Response(
-      JSON.stringify({ error: "Invalid type. Must be: feature, bug, or other" }),
+      JSON.stringify({
+        error: "Invalid type. Must be: feature, bug, or other",
+      }),
       { status: 400, headers: { "Content-Type": "application/json" } },
     );
   }
@@ -201,9 +203,9 @@ export const POST: APIRoute = async ({ request, clientAddress }) => {
     );
   } catch (err) {
     console.error("Failed to create GitHub issue:", err);
-    return new Response(
-      JSON.stringify({ error: "Internal server error" }),
-      { status: 500, headers: { "Content-Type": "application/json" } },
-    );
+    return new Response(JSON.stringify({ error: "Internal server error" }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 };

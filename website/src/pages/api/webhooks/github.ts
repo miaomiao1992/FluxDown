@@ -17,14 +17,17 @@
 
 import type { APIRoute } from "astro";
 import nodemailer from "nodemailer";
+import {
+  GITHUB_WEBHOOK_SECRET,
+  SMTP_HOST,
+  SMTP_PORT,
+  SMTP_USER,
+  SMTP_PASS,
+} from "astro:env/server";
 
 export const prerender = false;
 
-const WEBHOOK_SECRET = process.env.GITHUB_WEBHOOK_SECRET || "";
-const SMTP_HOST = process.env.SMTP_HOST || "";
-const SMTP_PORT = parseInt(process.env.SMTP_PORT || "465", 10);
-const SMTP_USER = process.env.SMTP_USER || "";
-const SMTP_PASS = process.env.SMTP_PASS || "";
+const WEBHOOK_SECRET = GITHUB_WEBHOOK_SECRET ?? "";
 const SITE_URL = "https://fluxdown.zerx.dev";
 
 // ── 签名验证 ──
@@ -203,10 +206,13 @@ export const POST: APIRoute = async ({ request }) => {
   const event = request.headers.get("x-github-event");
   if (event !== "issue_comment") {
     // 非评论事件，静默接受
-    return new Response(JSON.stringify({ ok: true, skipped: "not issue_comment" }), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    });
+    return new Response(
+      JSON.stringify({ ok: true, skipped: "not issue_comment" }),
+      {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      },
+    );
   }
 
   // 4. 解析 payload
@@ -250,7 +256,9 @@ export const POST: APIRoute = async ({ request }) => {
   // 8. 从 issue body 中提取联系邮箱
   const contactEmail = extractContactEmail(payload.issue.body || "");
   if (!contactEmail) {
-    console.log(`[webhook] Issue #${payload.issue.number} has no contact email, skipping`);
+    console.log(
+      `[webhook] Issue #${payload.issue.number} has no contact email, skipping`,
+    );
     return new Response(
       JSON.stringify({ ok: true, skipped: "no contact email" }),
       { status: 200, headers: { "Content-Type": "application/json" } },
@@ -260,10 +268,10 @@ export const POST: APIRoute = async ({ request }) => {
   // 9. 检查 SMTP 配置
   if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS) {
     console.error("[webhook] SMTP not configured");
-    return new Response(
-      JSON.stringify({ error: "SMTP not configured" }),
-      { status: 500, headers: { "Content-Type": "application/json" } },
-    );
+    return new Response(JSON.stringify({ error: "SMTP not configured" }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
   // 10. 发送邮件
@@ -280,15 +288,15 @@ export const POST: APIRoute = async ({ request }) => {
       `[webhook] Email sent to ${contactEmail} for issue #${payload.issue.number}`,
     );
 
-    return new Response(
-      JSON.stringify({ ok: true, sent: true }),
-      { status: 200, headers: { "Content-Type": "application/json" } },
-    );
+    return new Response(JSON.stringify({ ok: true, sent: true }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
   } catch (err) {
     console.error("[webhook] Failed to send email:", err);
-    return new Response(
-      JSON.stringify({ error: "Failed to send email" }),
-      { status: 500, headers: { "Content-Type": "application/json" } },
-    );
+    return new Response(JSON.stringify({ error: "Failed to send email" }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 };

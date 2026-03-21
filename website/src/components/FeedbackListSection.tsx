@@ -18,6 +18,7 @@ import {
   Tag,
 } from "lucide-react";
 import { useLocale } from "@/lib/i18n";
+import type { Messages } from "@/lib/locales";
 
 // ── 类型 ──
 
@@ -54,7 +55,11 @@ type LabelFilter = "" | "enhancement" | "bug" | "feedback";
 
 // ── 标签配置 ──
 
-const LABEL_CONFIG: { value: LabelFilter; icon: typeof Lightbulb; colorClass: string }[] = [
+const LABEL_CONFIG: {
+  value: LabelFilter;
+  icon: typeof Lightbulb;
+  colorClass: string;
+}[] = [
   { value: "", icon: Tag, colorClass: "text-dark-text-secondary" },
   { value: "enhancement", icon: Lightbulb, colorClass: "text-warning" },
   { value: "bug", icon: Bug, colorClass: "text-danger" },
@@ -82,12 +87,19 @@ function formatTimeAgo(dateStr: string, locale: string): string {
   return isZh ? "刚刚" : "just now";
 }
 
-function getLabelDisplayName(name: string, t: (key: string) => string): string {
+function getLabelDisplayName(
+  name: string,
+  t: (key: keyof Messages) => string,
+): string {
   switch (name) {
-    case "enhancement": return t("fbList.label.enhancement");
-    case "bug": return t("fbList.label.bug");
-    case "feedback": return t("fbList.label.feedback");
-    default: return name;
+    case "enhancement":
+      return t("fbList.label.enhancement");
+    case "bug":
+      return t("fbList.label.bug");
+    case "feedback":
+      return t("fbList.label.feedback");
+    default:
+      return name;
   }
 }
 
@@ -97,10 +109,14 @@ function getLabelColor(label: IssueLabel): string {
     return `#${label.color}`;
   }
   switch (label.name) {
-    case "enhancement": return "#f59e0b";
-    case "bug": return "#ef4444";
-    case "feedback": return "#06b6d4";
-    default: return "#71717a";
+    case "enhancement":
+      return "#f59e0b";
+    case "bug":
+      return "#ef4444";
+    case "feedback":
+      return "#06b6d4";
+    default:
+      return "#71717a";
   }
 }
 
@@ -110,7 +126,9 @@ interface FeedbackListSectionProps {
   onIssueClick?: (issueNumber: number) => void;
 }
 
-export default function FeedbackListSection({ onIssueClick }: FeedbackListSectionProps) {
+export default function FeedbackListSection({
+  onIssueClick,
+}: FeedbackListSectionProps) {
   const { t, locale } = useLocale();
   const [issues, setIssues] = useState<IssueItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -123,33 +141,36 @@ export default function FeedbackListSection({ onIssueClick }: FeedbackListSectio
 
   const PER_PAGE = 15;
 
-  const fetchIssues = useCallback(async (state: StateFilter, label: LabelFilter, p: number) => {
-    setLoading(true);
-    setError("");
+  const fetchIssues = useCallback(
+    async (state: StateFilter, label: LabelFilter, p: number) => {
+      setLoading(true);
+      setError("");
 
-    try {
-      const params = new URLSearchParams({
-        state,
-        page: String(p),
-        per_page: String(PER_PAGE),
-      });
-      if (label) params.set("label", label);
+      try {
+        const params = new URLSearchParams({
+          state,
+          page: String(p),
+          per_page: String(PER_PAGE),
+        });
+        if (label) params.set("label", label);
 
-      const res = await fetch(`/api/issues?${params}`);
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}`);
+        const res = await fetch(`/api/issues?${params}`);
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+
+        const data: IssuesResponse = await res.json();
+        setIssues(data.issues);
+        setHasMore(data.has_more);
+        setTotalShown(data.total_shown);
+      } catch {
+        setError(t("fbList.error"));
+      } finally {
+        setLoading(false);
       }
-
-      const data: IssuesResponse = await res.json();
-      setIssues(data.issues);
-      setHasMore(data.has_more);
-      setTotalShown(data.total_shown);
-    } catch {
-      setError(t("fbList.error"));
-    } finally {
-      setLoading(false);
-    }
-  }, [t]);
+    },
+    [t],
+  );
 
   useEffect(() => {
     fetchIssues(stateFilter, labelFilter, page);
@@ -213,9 +234,13 @@ export default function FeedbackListSection({ onIssueClick }: FeedbackListSectio
                     : "text-dark-text-secondary hover:text-dark-text-muted"
                 }`}
               >
-                {state === "open" && <CircleDot className="w-3 h-3 text-success" />}
-                {state === "closed" && <CircleCheck className="w-3 h-3 text-purple-400" />}
-                {t(`fbList.state.${state}`)}
+                {state === "open" && (
+                  <CircleDot className="w-3 h-3 text-success" />
+                )}
+                {state === "closed" && (
+                  <CircleCheck className="w-3 h-3 text-purple-400" />
+                )}
+                {t(`fbList.state.${state}` as keyof Messages)}
                 {stateFilter === state && (
                   <motion.div
                     layoutId="state-filter-bg"
@@ -240,7 +265,7 @@ export default function FeedbackListSection({ onIssueClick }: FeedbackListSectio
                 }`}
               >
                 <Icon className={`w-3 h-3 ${colorClass}`} />
-                {t(`fbList.labelFilter.${value || "all"}`)}
+                {t(`fbList.labelFilter.${value || "all"}` as keyof Messages)}
                 {labelFilter === value && (
                   <motion.div
                     layoutId="label-filter-bg"
@@ -272,7 +297,9 @@ export default function FeedbackListSection({ onIssueClick }: FeedbackListSectio
                 className="flex items-center justify-center py-16"
               >
                 <Loader2 className="w-6 h-6 animate-spin text-dark-text-secondary" />
-                <span className="ml-2 text-sm text-dark-text-secondary">{t("fbList.loading")}</span>
+                <span className="ml-2 text-sm text-dark-text-secondary">
+                  {t("fbList.loading")}
+                </span>
               </motion.div>
             ) : error ? (
               <motion.div
@@ -318,15 +345,18 @@ export default function FeedbackListSection({ onIssueClick }: FeedbackListSectio
                     >
                       <div className="flex items-start gap-3">
                         {/* State icon */}
-                        <div className="mt-0.5 shrink-0" title={
-                          issue.state === "open"
-                            ? t("issueDetail.open")
-                            : issue.close_reason === "not_planned"
-                              ? t("issueDetail.notPlanned")
-                              : issue.close_reason === "duplicate"
-                                ? t("issueDetail.duplicate")
-                                : t("issueDetail.completed")
-                        }>
+                        <div
+                          className="mt-0.5 shrink-0"
+                          title={
+                            issue.state === "open"
+                              ? t("issueDetail.open")
+                              : issue.close_reason === "not_planned"
+                                ? t("issueDetail.notPlanned")
+                                : issue.close_reason === "duplicate"
+                                  ? t("issueDetail.duplicate")
+                                  : t("issueDetail.completed")
+                          }
+                        >
                           {issue.state === "open" ? (
                             <CircleDot className="w-4 h-4 text-success" />
                           ) : issue.close_reason === "not_planned" ? (

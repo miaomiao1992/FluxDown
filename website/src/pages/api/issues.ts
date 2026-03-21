@@ -19,11 +19,9 @@
  */
 
 import type { APIRoute } from "astro";
+import { GITHUB_TOKEN, GITHUB_REPO } from "astro:env/server";
 
 export const prerender = false;
-
-const GITHUB_REPO = process.env.GITHUB_REPO || "user/x_down";
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN || "";
 
 // ── 类型 ──
 
@@ -80,7 +78,8 @@ interface FilteredIssue {
 function deriveCloseReason(issue: GitHubIssue): CloseReason {
   if (issue.state !== "closed") return null;
   // duplicate 标签优先级最高
-  if (issue.labels.some((l) => l.name.toLowerCase() === "duplicate")) return "duplicate";
+  if (issue.labels.some((l) => l.name.toLowerCase() === "duplicate"))
+    return "duplicate";
   if (issue.state_reason === "completed") return "completed";
   if (issue.state_reason === "not_planned") return "not_planned";
   // 默认按 completed 处理（老版本 API 可能没有 state_reason）
@@ -95,7 +94,10 @@ function parseLinkNext(header: string | null): string | null {
 }
 
 /** 按单个标签拉取 GitHub Issues（自动分页） */
-async function fetchIssuesByLabel(label: string, state: string): Promise<GitHubIssue[]> {
+async function fetchIssuesByLabel(
+  label: string,
+  state: string,
+): Promise<GitHubIssue[]> {
   const all: GitHubIssue[] = [];
   let url: string | null =
     `https://api.github.com/repos/${GITHUB_REPO}/issues?labels=${encodeURIComponent(label)}&state=${state}&per_page=100&sort=created&direction=desc`;
@@ -144,8 +146,9 @@ async function fetchAllFeedbackIssues(state: string): Promise<GitHubIssue[]> {
   }
 
   // 按创建时间降序排列
-  merged.sort((a, b) =>
-    new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+  merged.sort(
+    (a, b) =>
+      new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
   );
 
   return merged;
@@ -177,37 +180,49 @@ function truncateBody(body: string | null, maxLen: number = 200): string {
 async function fetchFilteredIssues(state: string): Promise<FilteredIssue[]> {
   const raw = await fetchAllFeedbackIssues(state);
 
-  return raw
-    // 排除 PR（GitHub Issues API 也会返回 PR）
-    .filter((issue) => !issue.pull_request)
-    // 排除带 subscription 标签的
-    .filter((issue) => !issue.labels.some((l) => l.name === "subscription"))
-    .map((issue) => ({
-      number: issue.number,
-      title: issue.title
-        // 移除 emoji 前缀如 "✨ [Website Feedback] "
-        .replace(/^[\u{1F300}-\u{1FAF6}\u{2600}-\u{27BF}\u{FE00}-\u{FE0F}\u{200D}\u{20E3}\u{E0020}-\u{E007F}]+\s*/u, "")
-        .replace(/^\[Website Feedback\]\s*/i, ""),
-      state: issue.state,
-      close_reason: deriveCloseReason(issue),
-      labels: issue.labels
-        .filter((l) => l.name !== "user-feedback" && l.name.toLowerCase() !== "duplicate")
-        .map((l) => ({ name: l.name, color: l.color })),
-      created_at: issue.created_at,
-      updated_at: issue.updated_at,
-      comments: issue.comments,
-      user: {
-        login: issue.user.login,
-        avatar_url: issue.user.avatar_url,
-      },
-      body_preview: truncateBody(issue.body),
-    }));
+  return (
+    raw
+      // 排除 PR（GitHub Issues API 也会返回 PR）
+      .filter((issue) => !issue.pull_request)
+      // 排除带 subscription 标签的
+      .filter((issue) => !issue.labels.some((l) => l.name === "subscription"))
+      .map((issue) => ({
+        number: issue.number,
+        title: issue.title
+          // 移除 emoji 前缀如 "✨ [Website Feedback] "
+          .replace(
+            /^[\u{1F300}-\u{1FAF6}\u{2600}-\u{27BF}\u{FE00}-\u{FE0F}\u{200D}\u{20E3}\u{E0020}-\u{E007F}]+\s*/u,
+            "",
+          )
+          .replace(/^\[Website Feedback\]\s*/i, ""),
+        state: issue.state,
+        close_reason: deriveCloseReason(issue),
+        labels: issue.labels
+          .filter(
+            (l) =>
+              l.name !== "user-feedback" &&
+              l.name.toLowerCase() !== "duplicate",
+          )
+          .map((l) => ({ name: l.name, color: l.color })),
+        created_at: issue.created_at,
+        updated_at: issue.updated_at,
+        comments: issue.comments,
+        user: {
+          login: issue.user.login,
+          avatar_url: issue.user.avatar_url,
+        },
+        body_preview: truncateBody(issue.body),
+      }))
+  );
 }
 
 export const GET: APIRoute = async ({ url }) => {
   const stateParam = url.searchParams.get("state")?.trim() || "all";
   const labelParam = url.searchParams.get("label")?.trim() || "";
-  const page = Math.max(1, parseInt(url.searchParams.get("page") || "1", 10) || 1);
+  const page = Math.max(
+    1,
+    parseInt(url.searchParams.get("page") || "1", 10) || 1,
+  );
   const perPage = Math.min(
     50,
     Math.max(1, parseInt(url.searchParams.get("per_page") || "15", 10) || 15),

@@ -1,9 +1,7 @@
 import type { APIRoute } from "astro";
+import { GITHUB_TOKEN, GITHUB_REPO } from "astro:env/server";
 
 export const prerender = false;
-
-const GITHUB_REPO = process.env.GITHUB_REPO || "user/x_down";
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN || "";
 
 const ISSUE_TITLE = "[Vote] Community Platform Poll";
 const ISSUE_LABEL = "vote";
@@ -142,17 +140,23 @@ const RESULTS_CACHE_TTL = 30_000;
 
 export const GET: APIRoute = async () => {
   if (!GITHUB_TOKEN) {
-    return new Response(
-      JSON.stringify({ error: "Server misconfigured" }),
-      { status: 500, headers: { "Content-Type": "application/json" } },
-    );
+    return new Response(JSON.stringify({ error: "Server misconfigured" }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
   try {
-    if (resultsCache && Date.now() - resultsCache.timestamp < RESULTS_CACHE_TTL) {
+    if (
+      resultsCache &&
+      Date.now() - resultsCache.timestamp < RESULTS_CACHE_TTL
+    ) {
       return new Response(JSON.stringify(resultsCache.data), {
         status: 200,
-        headers: { "Content-Type": "application/json", "Cache-Control": "public, s-maxage=30, stale-while-revalidate=60" },
+        headers: {
+          "Content-Type": "application/json",
+          "Cache-Control": "public, s-maxage=30, stale-while-revalidate=60",
+        },
       });
     }
 
@@ -179,14 +183,17 @@ export const GET: APIRoute = async () => {
 
     return new Response(JSON.stringify(data), {
       status: 200,
-      headers: { "Content-Type": "application/json", "Cache-Control": "public, s-maxage=30, stale-while-revalidate=60" },
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": "public, s-maxage=30, stale-while-revalidate=60",
+      },
     });
   } catch (err) {
     console.error("Failed to fetch vote results:", err);
-    return new Response(
-      JSON.stringify({ error: "Failed to fetch results" }),
-      { status: 500, headers: { "Content-Type": "application/json" } },
-    );
+    return new Response(JSON.stringify({ error: "Failed to fetch results" }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 };
 
@@ -194,34 +201,36 @@ export const POST: APIRoute = async ({ request, clientAddress }) => {
   const ip = clientAddress || "unknown";
 
   if (isRateLimited(ip)) {
-    return new Response(
-      JSON.stringify({ error: "Too many requests" }),
-      { status: 429, headers: { "Content-Type": "application/json" } },
-    );
+    return new Response(JSON.stringify({ error: "Too many requests" }), {
+      status: 429,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
   if (!GITHUB_TOKEN) {
-    return new Response(
-      JSON.stringify({ error: "Server misconfigured" }),
-      { status: 500, headers: { "Content-Type": "application/json" } },
-    );
+    return new Response(JSON.stringify({ error: "Server misconfigured" }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
   let body: { option?: string };
   try {
     body = await request.json();
   } catch {
-    return new Response(
-      JSON.stringify({ error: "Invalid JSON body" }),
-      { status: 400, headers: { "Content-Type": "application/json" } },
-    );
+    return new Response(JSON.stringify({ error: "Invalid JSON body" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
   const { option } = body;
 
   if (!option || !VALID_OPTIONS.includes(option)) {
     return new Response(
-      JSON.stringify({ error: `Invalid option. Must be: ${VALID_OPTIONS.join(", ")}` }),
+      JSON.stringify({
+        error: `Invalid option. Must be: ${VALID_OPTIONS.join(", ")}`,
+      }),
       { status: 400, headers: { "Content-Type": "application/json" } },
     );
   }
@@ -264,23 +273,23 @@ export const POST: APIRoute = async ({ request, clientAddress }) => {
     if (!commentRes.ok) {
       const text = await commentRes.text();
       console.error(`Failed to add vote: ${commentRes.status}`, text);
-      return new Response(
-        JSON.stringify({ error: "Failed to submit vote" }),
-        { status: 502, headers: { "Content-Type": "application/json" } },
-      );
+      return new Response(JSON.stringify({ error: "Failed to submit vote" }), {
+        status: 502,
+        headers: { "Content-Type": "application/json" },
+      });
     }
 
     resultsCache = null;
 
-    return new Response(
-      JSON.stringify({ success: true, message: "voted" }),
-      { status: 201, headers: { "Content-Type": "application/json" } },
-    );
+    return new Response(JSON.stringify({ success: true, message: "voted" }), {
+      status: 201,
+      headers: { "Content-Type": "application/json" },
+    });
   } catch (err) {
     console.error("Vote error:", err);
-    return new Response(
-      JSON.stringify({ error: "Internal server error" }),
-      { status: 500, headers: { "Content-Type": "application/json" } },
-    );
+    return new Response(JSON.stringify({ error: "Internal server error" }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 };

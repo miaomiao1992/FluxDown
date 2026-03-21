@@ -8,11 +8,15 @@
  *   page     - 页码，从 1 开始，默认 1
  *   per_page - 每页条数，默认 10，最大 100
  *   since    - 可选，起始版本号（含），如 "v0.0.2" 或 "0.0.2"
- *              代码保留字段，用于控制不展示某些旧版本
  *
  * 返回格式:
  * {
- *   releases: [ { tag, version, published_at, body } ],
+ *   releases: [
+ *     {
+ *       tag, version, published_at, body,
+ *       assets: [{ name, size, download_url }]
+ *     }
+ *   ],
  *   page: 1,
  *   per_page: 10,
  *   has_more: true
@@ -20,15 +24,21 @@
  */
 
 import type { APIRoute } from "astro";
+import { GITHUB_TOKEN, GITHUB_REPO } from "astro:env/server";
 
 export const prerender = false;
-
-const GITHUB_REPO = process.env.GITHUB_REPO || "user/x_down";
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN || "";
 
 // ── 全量缓存：拉取 GitHub 所有 release 后缓存，分页在返回时切片 ──
 let allCache: { releases: FilteredRelease[]; timestamp: number } | null = null;
 const CACHE_TTL = 300_000; // 5 分钟
+
+interface GitHubAsset {
+  name: string;
+  size: number;
+  download_count: number;
+  url: string;
+  browser_download_url: string;
+}
 
 interface GitHubRelease {
   tag_name: string;
@@ -37,6 +47,13 @@ interface GitHubRelease {
   draft: boolean;
   prerelease: boolean;
   body: string;
+  assets: GitHubAsset[];
+}
+
+interface ReleaseAsset {
+  name: string;
+  size: number;
+  download_url: string;
 }
 
 interface FilteredRelease {
@@ -44,6 +61,7 @@ interface FilteredRelease {
   version: string;
   published_at: string;
   body: string;
+  assets: ReleaseAsset[];
 }
 
 /** 将 tag 转为可比较的版本数组，如 "v0.0.3" → [0, 0, 3] */
@@ -76,6 +94,43 @@ function parseLinkNext(header: string | null): string | null {
   return match ? match[1] : null;
 }
 
+/**
+ * 判断某个 asset 是否是用户可下载的安装包/压缩包，
+ * 过滤掉 .yml / .yaml / .sig / .sha256 等校验/元数据文件。
+ */
+function isDownloadableAsset(name: string): boolean {
+  const lower = name.toLowerCase();
+  // 排除校验/元数据文件
+  if (
+    lower.endsWith(".yml") ||
+    lower.endsWith(".yaml") ||
+    lower.endsWith(".sig") ||
+    lower.endsWith(".sha256") ||
+    lower.endsWith(".sha512") ||
+    lower.endsWith(".asc") ||
+    lower.endsWith(".blockmap")
+  ) {
+    return false;
+  }
+  // 保留常见可下载格式
+  return (
+    lower.endsWith(".exe") ||
+    lower.endsWith(".zip") ||
+    lower.endsWith(".xpi") ||
+    lower.endsWith(".dmg") ||
+    lower.endsWith(".pkg") ||
+    lower.endsWith(".deb") ||
+    lower.endsWith(".rpm") ||
+    lower.endsWith(".appimage") ||
+    lower.endsWith(".tar.gz") ||
+    lower.endsWith(".tar.xz") ||
+    lower.endsWith(".tar.bz2") ||
+    lower.endsWith(".zst") ||
+    lower.endsWith(".msi") ||
+    lower.endsWith(".apk")
+  );
+}
+
 /** 拉取 GitHub 全部 releases（自动跟随分页） */
 async function fetchAllGitHubReleases(): Promise<GitHubRelease[]> {
   const all: GitHubRelease[] = [];
@@ -98,7 +153,6 @@ async function fetchAllGitHubReleases(): Promise<GitHubRelease[]> {
     const page: GitHubRelease[] = await res.json();
     all.push(...page);
 
-    // 跟随 Link: <...>; rel="next"
     url = parseLinkNext(res.headers.get("Link"));
   }
 
@@ -107,22 +161,29 @@ async function fetchAllGitHubReleases(): Promise<GitHubRelease[]> {
 
 /** 获取经过过滤和排序的全量 release 列表（带缓存） */
 async function getCachedReleases(since: string): Promise<FilteredRelease[]> {
-  // 缓存未过期则直接用
   if (!allCache || Date.now() - allCache.timestamp > CACHE_TTL) {
     const raw = await fetchAllGitHubReleases();
 
-    // 过滤草稿和预发布，按时间倒序
     const filtered = raw
       .filter((r) => !r.draft && !r.prerelease)
       .sort(
         (a, b) =>
-          new Date(b.published_at).getTime() - new Date(a.published_at).getTime(),
+          new Date(b.published_at).getTime() -
+          new Date(a.published_at).getTime(),
       )
       .map((r) => ({
         tag: r.tag_name,
         version: r.tag_name.replace(/^v/, ""),
         published_at: r.published_at,
         body: r.body || "",
+        assets: (r.assets || [])
+          .filter((a) => isDownloadableAsset(a.name))
+          .map((a) => ({
+            name: a.name,
+            size: a.size,
+            // 通过我们自己的代理端点下载，携带 tag 参数定位到对应版本
+            download_url: `/api/download/${encodeURIComponent(a.name)}?tag=${encodeURIComponent(r.tag_name)}`,
+          })),
       }));
 
     allCache = { releases: filtered, timestamp: Date.now() };
@@ -130,10 +191,11 @@ async function getCachedReleases(since: string): Promise<FilteredRelease[]> {
 
   let releases = allCache.releases;
 
-  // since 过滤（版本 >= since）
   if (since) {
     const sinceVer = parseVersion(since);
-    releases = releases.filter((r) => versionGte(parseVersion(r.tag), sinceVer));
+    releases = releases.filter((r) =>
+      versionGte(parseVersion(r.tag), sinceVer),
+    );
   }
 
   return releases;
@@ -141,7 +203,10 @@ async function getCachedReleases(since: string): Promise<FilteredRelease[]> {
 
 export const GET: APIRoute = async ({ url }) => {
   const sinceParam = url.searchParams.get("since")?.trim() || "";
-  const page = Math.max(1, parseInt(url.searchParams.get("page") || "1", 10) || 1);
+  const page = Math.max(
+    1,
+    parseInt(url.searchParams.get("page") || "1", 10) || 1,
+  );
   const perPage = Math.min(
     100,
     Math.max(1, parseInt(url.searchParams.get("per_page") || "10", 10) || 10),
@@ -175,7 +240,10 @@ export const GET: APIRoute = async ({ url }) => {
     });
   } catch (err) {
     return new Response(
-      JSON.stringify({ error: "Failed to fetch releases", detail: String(err) }),
+      JSON.stringify({
+        error: "Failed to fetch releases",
+        detail: String(err),
+      }),
       { status: 500, headers: { "Content-Type": "application/json" } },
     );
   }

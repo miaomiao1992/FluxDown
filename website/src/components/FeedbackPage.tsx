@@ -1,4 +1,5 @@
 import { useState, useCallback } from "react";
+import type { Messages } from "@/lib/locales";
 import { motion } from "framer-motion";
 import { Plus, List } from "lucide-react";
 import { useLocale } from "@/lib/i18n";
@@ -27,7 +28,7 @@ export default function FeedbackPage() {
     setActiveTab("list");
   }, []);
 
-  const tabs: { key: TabKey; icon: typeof List; labelKey: string }[] = [
+  const tabs: { key: TabKey; icon: typeof List; labelKey: keyof Messages }[] = [
     { key: "list", icon: List, labelKey: "fbPage.tabList" },
     { key: "submit", icon: Plus, labelKey: "fbPage.tabSubmit" },
   ];
@@ -55,7 +56,11 @@ export default function FeedbackPage() {
                     <motion.div
                       layoutId="feedback-tab-bg"
                       className="absolute inset-0 rounded-md bg-dark-surface2 border border-dark-border -z-10"
-                      transition={{ type: "spring", bounce: 0.15, duration: 0.4 }}
+                      transition={{
+                        type: "spring",
+                        bounce: 0.15,
+                        duration: 0.4,
+                      }}
                     />
                   )}
                 </button>
@@ -67,7 +72,10 @@ export default function FeedbackPage() {
 
       {/* Tab Content */}
       {activeTab === "list" ? (
-        <FeedbackListSection key={listRefreshKey} onIssueClick={handleIssueClick} />
+        <FeedbackListSection
+          key={listRefreshKey}
+          onIssueClick={handleIssueClick}
+        />
       ) : (
         <FeedbackSection onSuccess={handleFeedbackSuccess} />
       )}

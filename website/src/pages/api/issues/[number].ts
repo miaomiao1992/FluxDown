@@ -11,11 +11,9 @@
  */
 
 import type { APIRoute } from "astro";
+import { GITHUB_TOKEN, GITHUB_REPO } from "astro:env/server";
 
 export const prerender = false;
-
-const GITHUB_REPO = process.env.GITHUB_REPO || "user/x_down";
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN || "";
 
 // ── 缓存（每个 Issue 独立缓存） ──
 interface CacheEntry {
@@ -85,7 +83,8 @@ type CloseReason = "completed" | "not_planned" | "duplicate" | null;
 
 function deriveCloseReason(issue: GitHubIssue): CloseReason {
   if (issue.state !== "closed") return null;
-  if (issue.labels.some((l) => l.name.toLowerCase() === "duplicate")) return "duplicate";
+  if (issue.labels.some((l) => l.name.toLowerCase() === "duplicate"))
+    return "duplicate";
   if (issue.state_reason === "completed") return "completed";
   if (issue.state_reason === "not_planned") return "not_planned";
   return "completed";
@@ -93,9 +92,9 @@ function deriveCloseReason(issue: GitHubIssue): CloseReason {
 
 /** 从 feedback body 中解析的结构化元数据 */
 interface ParsedMetadata {
-  type: string | null;       // feature / bug / other
-  contact: string | null;    // 联系方式（可选）
-  source: string | null;     // 来源
+  type: string | null; // feature / bug / other
+  contact: string | null; // 联系方式（可选）
+  source: string | null; // 来源
   submitted_at: string | null; // 提交时间 ISO
 }
 
@@ -209,7 +208,10 @@ function parseFeedbackBody(body: string): {
 function parseVisitorComment(body: string): string {
   if (!body.includes("Website visitor reply")) return body;
 
-  let content = body.replace(/^>\s*\uD83D\uDCAC\s*Website visitor reply\s*\n*/u, "");
+  let content = body.replace(
+    /^>\s*\uD83D\uDCAC\s*Website visitor reply\s*\n*/u,
+    "",
+  );
 
   const sepIdx = content.indexOf("\n---\n");
   if (sepIdx >= 0) {
@@ -228,10 +230,9 @@ async function fetchIssueDetail(issueNumber: number): Promise<IssueDetail> {
 
   // 并行请求 Issue 详情和评论
   const [issueRes, commentsRes] = await Promise.all([
-    fetch(
-      `https://api.github.com/repos/${GITHUB_REPO}/issues/${issueNumber}`,
-      { headers: defaultHeaders },
-    ),
+    fetch(`https://api.github.com/repos/${GITHUB_REPO}/issues/${issueNumber}`, {
+      headers: defaultHeaders,
+    }),
     fetch(
       `https://api.github.com/repos/${GITHUB_REPO}/issues/${issueNumber}/comments?per_page=100`,
       { headers: defaultHeaders },
@@ -246,7 +247,9 @@ async function fetchIssueDetail(issueNumber: number): Promise<IssueDetail> {
   }
 
   if (!commentsRes.ok) {
-    throw new Error(`GitHub API comments ${commentsRes.status}: ${await commentsRes.text()}`);
+    throw new Error(
+      `GitHub API comments ${commentsRes.status}: ${await commentsRes.text()}`,
+    );
   }
 
   const issue: GitHubIssue = await issueRes.json();
@@ -260,12 +263,18 @@ async function fetchIssueDetail(issueNumber: number): Promise<IssueDetail> {
     issue: {
       number: issue.number,
       title: issue.title
-        .replace(/^[\u{1F300}-\u{1FAF6}\u{2600}-\u{27BF}\u{FE00}-\u{FE0F}\u{200D}\u{20E3}\u{E0020}-\u{E007F}]+\s*/u, "")
+        .replace(
+          /^[\u{1F300}-\u{1FAF6}\u{2600}-\u{27BF}\u{FE00}-\u{FE0F}\u{200D}\u{20E3}\u{E0020}-\u{E007F}]+\s*/u,
+          "",
+        )
         .replace(/^\[Website Feedback\]\s*/i, ""),
       state: issue.state,
       close_reason: deriveCloseReason(issue),
       labels: issue.labels
-        .filter((l) => l.name !== "user-feedback" && l.name.toLowerCase() !== "duplicate")
+        .filter(
+          (l) =>
+            l.name !== "user-feedback" && l.name.toLowerCase() !== "duplicate",
+        )
         .map((l) => ({ name: l.name, color: l.color })),
       created_at: issue.created_at,
       updated_at: issue.updated_at,
@@ -301,18 +310,18 @@ export const GET: APIRoute = async ({ params }) => {
   const numberStr = params.number;
 
   if (!numberStr) {
-    return new Response(
-      JSON.stringify({ error: "Missing issue number" }),
-      { status: 400, headers: { "Content-Type": "application/json" } },
-    );
+    return new Response(JSON.stringify({ error: "Missing issue number" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
   const issueNumber = parseInt(numberStr, 10);
   if (isNaN(issueNumber) || issueNumber <= 0) {
-    return new Response(
-      JSON.stringify({ error: "Invalid issue number" }),
-      { status: 400, headers: { "Content-Type": "application/json" } },
-    );
+    return new Response(JSON.stringify({ error: "Invalid issue number" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
   if (!GITHUB_TOKEN) {
@@ -334,15 +343,18 @@ export const GET: APIRoute = async ({ params }) => {
     });
   } catch (err) {
     if (err instanceof Error && err.message === "NOT_FOUND") {
-      return new Response(
-        JSON.stringify({ error: "Issue not found" }),
-        { status: 404, headers: { "Content-Type": "application/json" } },
-      );
+      return new Response(JSON.stringify({ error: "Issue not found" }), {
+        status: 404,
+        headers: { "Content-Type": "application/json" },
+      });
     }
 
     console.error("Failed to fetch issue detail:", err);
     return new Response(
-      JSON.stringify({ error: "Failed to fetch issue detail", detail: String(err) }),
+      JSON.stringify({
+        error: "Failed to fetch issue detail",
+        detail: String(err),
+      }),
       { status: 500, headers: { "Content-Type": "application/json" } },
     );
   }

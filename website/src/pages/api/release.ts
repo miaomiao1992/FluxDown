@@ -18,11 +18,9 @@
  */
 
 import type { APIRoute } from "astro";
+import { GITHUB_TOKEN, GITHUB_REPO } from "astro:env/server";
 
 export const prerender = false;
-
-const GITHUB_REPO = process.env.GITHUB_REPO || "user/x_down";
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN || "";
 
 // 缓存：避免每次请求都打 GitHub API（60 秒）
 let cache: { data: unknown; timestamp: number } | null = null;
@@ -71,7 +69,7 @@ export const GET: APIRoute = async () => {
       `https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=100`;
 
     while (url) {
-      const res = await fetch(url, {
+      const res: Response = await fetch(url, {
         headers: {
           Authorization: `Bearer ${GITHUB_TOKEN}`,
           Accept: "application/vnd.github+json",
@@ -82,7 +80,10 @@ export const GET: APIRoute = async () => {
       if (!res.ok) {
         const text = await res.text();
         return new Response(
-          JSON.stringify({ error: `GitHub API error: ${res.status}`, detail: text }),
+          JSON.stringify({
+            error: `GitHub API error: ${res.status}`,
+            detail: text,
+          }),
           { status: 502, headers: { "Content-Type": "application/json" } },
         );
       }
@@ -90,8 +91,9 @@ export const GET: APIRoute = async () => {
       const page: GitHubRelease[] = await res.json();
       allReleases.push(...page);
 
-      const link = res.headers.get("Link");
-      const next = link?.match(/<([^>]+)>;\s*rel="next"/);
+      const link: string | null = res.headers.get("Link");
+      const next: RegExpMatchArray | null =
+        link?.match(/<([^>]+)>;\s*rel="next"/) ?? null;
       url = next ? next[1] : null;
     }
 
@@ -109,24 +111,43 @@ export const GET: APIRoute = async () => {
     const version = latest.tag_name.replace(/^v/, "");
 
     // 匹配资产文件（兼容旧命名：-windows-setup.exe / 新命名：-windows-x64-setup.exe）
-    const setupAsset = latest.assets.find((a) =>
-      a.name.endsWith("-windows-x64-setup.exe") || a.name.endsWith("-windows-setup.exe"),
+    const setupAsset = latest.assets.find(
+      (a) =>
+        a.name.endsWith("-windows-x64-setup.exe") ||
+        a.name.endsWith("-windows-setup.exe"),
     );
-    const portableAsset = latest.assets.find((a) =>
-      a.name.endsWith("-windows-x64-portable.zip") || a.name.endsWith("-windows-portable.zip"),
+    const portableAsset = latest.assets.find(
+      (a) =>
+        a.name.endsWith("-windows-x64-portable.zip") ||
+        a.name.endsWith("-windows-portable.zip"),
     );
     // ARM64 资产（仅新版 Release 包含）
-    const setupArm64Asset = latest.assets.find((a) => a.name.endsWith("-windows-arm64-setup.exe"));
-    const portableArm64Asset = latest.assets.find((a) => a.name.endsWith("-windows-arm64-portable.zip"));
-    const extensionAsset = latest.assets.find((a) =>
-      a.name.endsWith("-chrome.zip") || a.name.endsWith("-extension.zip"),
+    const setupArm64Asset = latest.assets.find((a) =>
+      a.name.endsWith("-windows-arm64-setup.exe"),
     );
-    const firefoxExtensionAsset = latest.assets.find((a) => a.name.endsWith("-firefox.xpi"));
+    const portableArm64Asset = latest.assets.find((a) =>
+      a.name.endsWith("-windows-arm64-portable.zip"),
+    );
+    const extensionAsset = latest.assets.find(
+      (a) =>
+        a.name.endsWith("-chrome.zip") || a.name.endsWith("-extension.zip"),
+    );
+    const firefoxExtensionAsset = latest.assets.find((a) =>
+      a.name.endsWith("-firefox.xpi"),
+    );
     // Linux 资产
-    const linuxAppImageAsset = latest.assets.find((a) => a.name.endsWith("-linux-x64.AppImage"));
-    const linuxDebAsset = latest.assets.find((a) => a.name.endsWith("-linux-x64.deb"));
-    const linuxArchAsset = latest.assets.find((a) => a.name.endsWith("-linux-x64.pkg.tar.zst"));
-    const linuxTarballAsset = latest.assets.find((a) => a.name.endsWith("-linux-x64.tar.gz"));
+    const linuxAppImageAsset = latest.assets.find((a) =>
+      a.name.endsWith("-linux-x64.AppImage"),
+    );
+    const linuxDebAsset = latest.assets.find((a) =>
+      a.name.endsWith("-linux-x64.deb"),
+    );
+    const linuxArchAsset = latest.assets.find((a) =>
+      a.name.endsWith("-linux-x64.pkg.tar.zst"),
+    );
+    const linuxTarballAsset = latest.assets.find((a) =>
+      a.name.endsWith("-linux-x64.tar.gz"),
+    );
 
     const formatAsset = (asset: GitHubAsset | undefined) => {
       if (!asset) return null;
@@ -177,7 +198,10 @@ export const GET: APIRoute = async () => {
     });
   } catch (err) {
     return new Response(
-      JSON.stringify({ error: "Failed to fetch release info", detail: String(err) }),
+      JSON.stringify({
+        error: "Failed to fetch release info",
+        detail: String(err),
+      }),
       { status: 500, headers: { "Content-Type": "application/json" } },
     );
   }

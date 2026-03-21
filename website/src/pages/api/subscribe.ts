@@ -16,11 +16,9 @@
  */
 
 import type { APIRoute } from "astro";
+import { GITHUB_TOKEN, GITHUB_REPO } from "astro:env/server";
 
 export const prerender = false;
-
-const GITHUB_REPO = process.env.GITHUB_REPO || "user/x_down";
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN || "";
 
 const ISSUE_TITLE = "[Subscription] Platform Availability Notifications";
 const ISSUE_LABEL = "subscription";
@@ -44,19 +42,21 @@ function isRateLimited(ip: string): boolean {
 
 // ---------- GitHub helpers ----------
 
-const ghHeaders = {
-  Authorization: `Bearer ${GITHUB_TOKEN}`,
-  Accept: "application/vnd.github+json",
-  "X-GitHub-Api-Version": "2022-11-28",
-  "Content-Type": "application/json",
-};
+function ghHeaders() {
+  return {
+    Authorization: `Bearer ${GITHUB_TOKEN}`,
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+    "Content-Type": "application/json",
+  };
+}
 
 /** 查找或创建聚合 Issue，返回 issue number */
 async function findOrCreateIssue(): Promise<number> {
   // 搜索已有 Issue
   const searchRes = await fetch(
     `https://api.github.com/repos/${GITHUB_REPO}/issues?labels=${ISSUE_LABEL}&state=open&per_page=1`,
-    { headers: ghHeaders },
+    { headers: ghHeaders() },
   );
 
   if (searchRes.ok) {
@@ -71,7 +71,7 @@ async function findOrCreateIssue(): Promise<number> {
     `https://api.github.com/repos/${GITHUB_REPO}/issues`,
     {
       method: "POST",
-      headers: ghHeaders,
+      headers: ghHeaders(),
       body: JSON.stringify({
         title: ISSUE_TITLE,
         body: [
@@ -93,7 +93,9 @@ async function findOrCreateIssue(): Promise<number> {
 
   if (!createRes.ok) {
     const text = await createRes.text();
-    throw new Error(`Failed to create subscription issue: ${createRes.status} ${text}`);
+    throw new Error(
+      `Failed to create subscription issue: ${createRes.status} ${text}`,
+    );
   }
 
   const created = await createRes.json();
@@ -101,14 +103,17 @@ async function findOrCreateIssue(): Promise<number> {
 }
 
 /** 检查邮箱是否已订阅（遍历 Issue 评论） */
-async function isAlreadySubscribed(issueNumber: number, email: string): Promise<boolean> {
+async function isAlreadySubscribed(
+  issueNumber: number,
+  email: string,
+): Promise<boolean> {
   let page = 1;
   const lowerEmail = email.toLowerCase();
 
   while (true) {
     const res = await fetch(
       `https://api.github.com/repos/${GITHUB_REPO}/issues/${issueNumber}/comments?per_page=100&page=${page}`,
-      { headers: ghHeaders },
+      { headers: ghHeaders() },
     );
 
     if (!res.ok) break;
@@ -159,21 +164,14 @@ export const POST: APIRoute = async ({ request, clientAddress }) => {
     );
   }
 
-  if (!GITHUB_TOKEN) {
-    return new Response(
-      JSON.stringify({ error: "Server misconfigured" }),
-      { status: 500, headers: { "Content-Type": "application/json" } },
-    );
-  }
-
   let body: { email?: string; platform?: string };
   try {
     body = await request.json();
   } catch {
-    return new Response(
-      JSON.stringify({ error: "Invalid JSON body" }),
-      { status: 400, headers: { "Content-Type": "application/json" } },
-    );
+    return new Response(JSON.stringify({ error: "Invalid JSON body" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
   const { email, platform } = body;
@@ -187,15 +185,17 @@ export const POST: APIRoute = async ({ request, clientAddress }) => {
   }
 
   if (!EMAIL_RE.test(email)) {
-    return new Response(
-      JSON.stringify({ error: "Invalid email address" }),
-      { status: 400, headers: { "Content-Type": "application/json" } },
-    );
+    return new Response(JSON.stringify({ error: "Invalid email address" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
   if (!["web", "macos", "linux", "mobile"].includes(platform)) {
     return new Response(
-      JSON.stringify({ error: "Invalid platform. Must be: web, macos, linux or mobile" }),
+      JSON.stringify({
+        error: "Invalid platform. Must be: web, macos, linux or mobile",
+      }),
       { status: 400, headers: { "Content-Type": "application/json" } },
     );
   }
@@ -240,7 +240,7 @@ export const POST: APIRoute = async ({ request, clientAddress }) => {
       `https://api.github.com/repos/${GITHUB_REPO}/issues/${issueNumber}/comments`,
       {
         method: "POST",
-        headers: ghHeaders,
+        headers: ghHeaders(),
         body: JSON.stringify({ body: commentBody }),
       },
     );
@@ -248,10 +248,10 @@ export const POST: APIRoute = async ({ request, clientAddress }) => {
     if (!commentRes.ok) {
       const text = await commentRes.text();
       console.error(`Failed to add comment: ${commentRes.status}`, text);
-      return new Response(
-        JSON.stringify({ error: "Failed to subscribe" }),
-        { status: 502, headers: { "Content-Type": "application/json" } },
-      );
+      return new Response(JSON.stringify({ error: "Failed to subscribe" }), {
+        status: 502,
+        headers: { "Content-Type": "application/json" },
+      });
     }
 
     return new Response(
@@ -260,9 +260,9 @@ export const POST: APIRoute = async ({ request, clientAddress }) => {
     );
   } catch (err) {
     console.error("Subscribe error:", err);
-    return new Response(
-      JSON.stringify({ error: "Internal server error" }),
-      { status: 500, headers: { "Content-Type": "application/json" } },
-    );
+    return new Response(JSON.stringify({ error: "Internal server error" }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 };

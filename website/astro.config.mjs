@@ -1,12 +1,12 @@
 // @ts-check
-import { defineConfig } from "astro/config";
+import { defineConfig, envField } from "astro/config";
 
 import react from "@astrojs/react";
 import sitemap from "@astrojs/sitemap";
 import tailwindcss from "@tailwindcss/vite";
 import node from "@astrojs/node";
 
-// https://astro.build/config
+// https://astro.com/docs/en/guides/environment-variables/
 export default defineConfig({
   site: "https://fluxdown.zerx.dev",
   adapter: node({ mode: "standalone" }),
@@ -14,5 +14,50 @@ export default defineConfig({
 
   vite: {
     plugins: [tailwindcss()],
+  },
+
+  env: {
+    schema: {
+      // ── 必填：GitHub 私有仓库访问凭证 ──
+      GITHUB_TOKEN: envField.string({
+        context: "server",
+        access: "secret",
+      }),
+      GITHUB_REPO: envField.string({
+        context: "server",
+        access: "secret",
+        default: "user/x_down",
+      }),
+
+      // ── 可选：Webhook 签名校验 ──
+      GITHUB_WEBHOOK_SECRET: envField.string({
+        context: "server",
+        access: "secret",
+        optional: true,
+      }),
+
+      // ── 可选：SMTP 邮件配置 ──
+      SMTP_HOST: envField.string({
+        context: "server",
+        access: "secret",
+        optional: true,
+      }),
+      SMTP_PORT: envField.number({
+        context: "server",
+        access: "secret",
+        default: 465,
+        optional: true,
+      }),
+      SMTP_USER: envField.string({
+        context: "server",
+        access: "secret",
+        optional: true,
+      }),
+      SMTP_PASS: envField.string({
+        context: "server",
+        access: "secret",
+        optional: true,
+      }),
+    },
   },
 });

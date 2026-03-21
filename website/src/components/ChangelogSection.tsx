@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { motion } from "framer-motion";
+import type { Messages } from "@/lib/locales";
+import { motion, AnimatePresence } from "framer-motion";
 import {
   History,
   Tag,
@@ -9,17 +10,186 @@ import {
   FileCode,
   FileText,
   Check,
+  Download,
+  Package,
+  MonitorDown,
+  Cpu,
 } from "lucide-react";
 import { useLocale } from "@/lib/i18n";
+
+interface ReleaseAsset {
+  name: string;
+  size: number;
+  download_url: string;
+}
 
 interface Release {
   tag: string;
   version: string;
   published_at: string;
   body: string;
+  assets: ReleaseAsset[];
 }
 
 const PER_PAGE = 10;
+
+/** 格式化文件大小 */
+function formatSize(bytes: number): string {
+  if (bytes === 0) return "0 B";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** 根据文件名推断平台/类型标签与图标 */
+function inferAssetMeta(name: string): {
+  label: string;
+  sub: string;
+  icon: React.ReactNode;
+} {
+  const lower = name.toLowerCase();
+
+  // Windows
+  if (
+    lower.endsWith("-windows-x64-setup.exe") ||
+    lower.endsWith("-windows-setup.exe")
+  ) {
+    return {
+      label: "Windows",
+      sub: "x64 安装包",
+      icon: <MonitorDown className="w-3.5 h-3.5" />,
+    };
+  }
+  if (lower.endsWith("-windows-arm64-setup.exe")) {
+    return {
+      label: "Windows",
+      sub: "ARM64 安装包",
+      icon: <MonitorDown className="w-3.5 h-3.5" />,
+    };
+  }
+  if (
+    lower.endsWith("-windows-x64-portable.zip") ||
+    lower.endsWith("-windows-portable.zip")
+  ) {
+    return {
+      label: "Windows",
+      sub: "x64 便携版",
+      icon: <Package className="w-3.5 h-3.5" />,
+    };
+  }
+  if (lower.endsWith("-windows-arm64-portable.zip")) {
+    return {
+      label: "Windows",
+      sub: "ARM64 便携版",
+      icon: <Package className="w-3.5 h-3.5" />,
+    };
+  }
+  // macOS
+  if (lower.endsWith(".dmg")) {
+    return {
+      label: "macOS",
+      sub: "安装镜像",
+      icon: <MonitorDown className="w-3.5 h-3.5" />,
+    };
+  }
+  if (lower.endsWith(".pkg")) {
+    return {
+      label: "macOS",
+      sub: "安装包",
+      icon: <Package className="w-3.5 h-3.5" />,
+    };
+  }
+  // Linux
+  if (lower.endsWith("-linux-x64.appimage")) {
+    return {
+      label: "Linux",
+      sub: "AppImage x64",
+      icon: <Cpu className="w-3.5 h-3.5" />,
+    };
+  }
+  if (lower.endsWith("-linux-x64.deb")) {
+    return {
+      label: "Linux",
+      sub: "Debian/Ubuntu",
+      icon: <Cpu className="w-3.5 h-3.5" />,
+    };
+  }
+  if (lower.endsWith("-linux-x64.pkg.tar.zst")) {
+    return {
+      label: "Linux",
+      sub: "Arch Linux",
+      icon: <Cpu className="w-3.5 h-3.5" />,
+    };
+  }
+  if (lower.endsWith("-linux-x64.tar.gz")) {
+    return {
+      label: "Linux",
+      sub: "x64 Tarball",
+      icon: <Package className="w-3.5 h-3.5" />,
+    };
+  }
+  if (lower.endsWith(".rpm")) {
+    return {
+      label: "Linux",
+      sub: "RPM 包",
+      icon: <Cpu className="w-3.5 h-3.5" />,
+    };
+  }
+  // Extension
+  if (lower.endsWith("-chrome.zip") || lower.endsWith("-extension.zip")) {
+    return {
+      label: "扩展",
+      sub: "Chrome / Edge",
+      icon: <Package className="w-3.5 h-3.5" />,
+    };
+  }
+  if (lower.endsWith("-firefox.xpi")) {
+    return {
+      label: "扩展",
+      sub: "Firefox",
+      icon: <Package className="w-3.5 h-3.5" />,
+    };
+  }
+  // fallback
+  return {
+    label: "其他",
+    sub: name,
+    icon: <Download className="w-3.5 h-3.5" />,
+  };
+}
+
+/** 平台组排序权重 */
+const PLATFORM_ORDER: Record<string, number> = {
+  Windows: 0,
+  macOS: 1,
+  Linux: 2,
+  扩展: 3,
+  其他: 99,
+};
+
+/** 将 assets 按平台分组 */
+function groupAssets(assets: ReleaseAsset[]): Array<{
+  platform: string;
+  items: Array<{
+    asset: ReleaseAsset;
+    meta: ReturnType<typeof inferAssetMeta>;
+  }>;
+}> {
+  const map = new Map<
+    string,
+    Array<{ asset: ReleaseAsset; meta: ReturnType<typeof inferAssetMeta> }>
+  >();
+
+  for (const asset of assets) {
+    const meta = inferAssetMeta(asset.name);
+    if (!map.has(meta.label)) map.set(meta.label, []);
+    map.get(meta.label)!.push({ asset, meta });
+  }
+
+  return [...map.entries()]
+    .sort(([a], [b]) => (PLATFORM_ORDER[a] ?? 50) - (PLATFORM_ORDER[b] ?? 50))
+    .map(([platform, items]) => ({ platform, items }));
+}
 
 /** 对非代码块的 Markdown 段落做 HTML 转义 + 简单 Markdown 处理 */
 function renderInlineMarkdown(segment: string): string {
@@ -55,34 +225,27 @@ function renderInlineMarkdown(segment: string): string {
     .replace(/\n{3,}/g, "\n\n");
 }
 
-/** 简易 Markdown → HTML（仅处理 release notes 常用语法） */
+/** 简易 Markdown → HTML */
 function renderMarkdown(md: string): string {
-  // ── Step 1: 提取围栏代码块，生成 <pre> HTML ──
-  // 支持行首可选前导空格（GitHub release 中常见缩进写法）
-  // 将结果存为 {type: 'code'|'text', content: string}[] 分段处理，
-  // 确保代码块内部不会被后续 Markdown 正则二次处理。
   const FENCE_RE = /^([ \t]*)```([^\n]*)\n([\s\S]*?)^\1```[ \t]*$/gm;
-
   const parts: Array<{ type: "code" | "text"; content: string }> = [];
   let lastIndex = 0;
   let match: RegExpExecArray | null;
 
   while ((match = FENCE_RE.exec(md)) !== null) {
-    // 代码块之前的文本段
     if (match.index > lastIndex) {
       parts.push({ type: "text", content: md.slice(lastIndex, match.index) });
     }
-
     const _indent = match[1];
     const lang = match[2];
     const code = match[3];
-
-    // 去除与围栏等宽的公共前缀缩进
     const indentLen = _indent.length;
     const dedented = indentLen
       ? code
           .split("\n")
-          .map((line) => (line.startsWith(_indent) ? line.slice(indentLen) : line))
+          .map((line) =>
+            line.startsWith(_indent) ? line.slice(indentLen) : line,
+          )
           .join("\n")
       : code;
     const escaped = dedented
@@ -94,16 +257,13 @@ function renderMarkdown(md: string): string {
       : "";
     const html = `<pre class="changelog-pre my-3 rounded-lg bg-dark-surface3 border border-dark-border overflow-x-auto p-4"${langAttr}><code class="text-xs font-mono text-dark-text-secondary leading-relaxed whitespace-pre">${escaped.replace(/\n$/, "")}</code></pre>`;
     parts.push({ type: "code", content: html });
-
     lastIndex = match.index + match[0].length;
   }
 
-  // 最后一段文本
   if (lastIndex < md.length) {
     parts.push({ type: "text", content: md.slice(lastIndex) });
   }
 
-  // ── Step 2: 分段处理，代码块直接输出，文本段走 Markdown 转换 ──
   return parts
     .map((part) =>
       part.type === "code" ? part.content : renderInlineMarkdown(part.content),
@@ -121,7 +281,7 @@ function formatDate(dateStr: string, locale: string): string {
   });
 }
 
-/** 去除内联 Markdown 语法，返回纯文本；反引号内容用方括号包裹 */
+/** 去除内联 Markdown 语法，返回纯文本 */
 function cleanInline(text: string): string {
   return text
     .replace(/\*\*(.+?)\*\*/g, "$1")
@@ -168,7 +328,6 @@ function toPlainText(release: Release, locale: string): string {
     }
   }
 
-  // 去掉末尾多余空行
   while (result.length > 0 && result[result.length - 1] === "") {
     result.pop();
   }
@@ -201,7 +360,7 @@ function CopyButtons({
 }: {
   release: Release;
   locale: string;
-  t: (key: string) => string;
+  t: (key: keyof Messages) => string;
 }) {
   const [mdState, setMdState] = useState<"idle" | "copied">("idle");
   const [textState, setTextState] = useState<"idle" | "copied">("idle");
@@ -210,7 +369,6 @@ function CopyButtons({
     try {
       await navigator.clipboard.writeText(content);
     } catch {
-      // fallback for older browsers
       const el = document.createElement("textarea");
       el.value = content;
       el.style.position = "fixed";
@@ -268,6 +426,105 @@ function CopyButtons({
   );
 }
 
+/** 单个 asset 下载按钮 */
+function AssetButton({ asset }: { asset: ReleaseAsset }) {
+  const meta = inferAssetMeta(asset.name);
+  return (
+    <a
+      href={asset.download_url}
+      download
+      title={asset.name}
+      className="group flex items-center gap-2 px-3 py-2 rounded-lg border border-dark-border bg-dark-surface2 hover:border-brand-sky/40 hover:bg-brand-sky/5 transition-all duration-150"
+    >
+      <span className="text-dark-text-muted group-hover:text-brand-sky transition-colors shrink-0">
+        {meta.icon}
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="text-xs font-medium text-dark-text group-hover:text-brand-sky transition-colors leading-tight truncate">
+          {meta.sub}
+        </div>
+        <div className="text-[10px] text-dark-text-muted leading-tight mt-0.5">
+          {formatSize(asset.size)}
+        </div>
+      </div>
+      <Download className="w-3 h-3 text-dark-text-muted group-hover:text-brand-sky transition-colors shrink-0" />
+    </a>
+  );
+}
+
+/** 版本下载面板（可折叠） */
+function AssetsPanel({
+  release,
+  t,
+}: {
+  release: Release;
+  t: (key: keyof Messages) => string;
+}) {
+  const [open, setOpen] = useState(false);
+  const groups = groupAssets(release.assets);
+
+  if (release.assets.length === 0) return null;
+
+  return (
+    <div className="border-t border-dark-border">
+      {/* 折叠触发按钮 */}
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center gap-2 px-5 py-3 text-xs text-dark-text-muted hover:text-dark-text hover:bg-dark-surface2/50 transition-all duration-150 cursor-pointer select-none"
+      >
+        <Download className="w-3.5 h-3.5 shrink-0" />
+        <span className="font-medium">
+          {t("changelog.downloadAssets")}
+          <span className="ml-1.5 px-1.5 py-0.5 rounded-full bg-dark-surface3 text-dark-text-muted text-[10px] font-normal">
+            {release.assets.length}
+          </span>
+        </span>
+        <ChevronDown
+          className={`w-3.5 h-3.5 ml-auto shrink-0 transition-transform duration-200 ${open ? "rotate-180" : ""}`}
+        />
+      </button>
+
+      {/* 下载列表 */}
+      <AnimatePresence initial={false}>
+        {open && (
+          <motion.div
+            key="assets"
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.2, ease: "easeInOut" }}
+            className="overflow-hidden"
+          >
+            <div className="px-5 pb-4 pt-1 space-y-4">
+              {groups.map(({ platform, items }) => (
+                <div key={platform}>
+                  {/* 平台标题 */}
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="text-[10px] font-semibold text-dark-text-muted uppercase tracking-wider">
+                      {platform}
+                    </span>
+                    <div className="flex-1 h-px bg-dark-border" />
+                  </div>
+                  {/* 文件网格 */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {items.map(({ asset }) => (
+                      <AssetButton key={asset.name} asset={asset} />
+                    ))}
+                  </div>
+                </div>
+              ))}
+              {/* 免责说明 */}
+              <p className="text-[10px] text-dark-text-muted leading-relaxed pt-1">
+                {t("changelog.assetsNote")}
+              </p>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
 export default function ChangelogSection() {
   const { locale, t } = useLocale();
   const [releases, setReleases] = useState<Release[]>([]);
@@ -278,7 +535,6 @@ export default function ChangelogSection() {
   const [hasMore, setHasMore] = useState(false);
   const initialFetched = useRef(false);
 
-  // 请求某一页数据
   const fetchPage = useCallback(async (p: number, append: boolean) => {
     if (append) {
       setLoadingMore(true);
@@ -304,7 +560,6 @@ export default function ChangelogSection() {
     }
   }, []);
 
-  // 首次加载
   useEffect(() => {
     if (initialFetched.current) return;
     initialFetched.current = true;
@@ -412,6 +667,9 @@ export default function ChangelogSection() {
                         __html: renderMarkdown(release.body),
                       }}
                     />
+
+                    {/* Assets download panel */}
+                    <AssetsPanel release={release} t={t} />
                   </div>
                 </motion.article>
               ))}

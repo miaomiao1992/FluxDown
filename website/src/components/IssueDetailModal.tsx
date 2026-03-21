@@ -21,6 +21,7 @@ import {
   CheckCircle2,
 } from "lucide-react";
 import { useLocale } from "@/lib/i18n";
+import type { Messages } from "@/lib/locales";
 
 // ── 类型 ──
 
@@ -151,26 +152,45 @@ function formatTimeAgo(dateStr: string, locale: string): string {
 function getLabelColor(label: IssueLabel): string {
   if (label.color) return `#${label.color}`;
   switch (label.name) {
-    case "enhancement": return "#f59e0b";
-    case "bug": return "#ef4444";
-    case "feedback": return "#06b6d4";
-    default: return "#71717a";
+    case "enhancement":
+      return "#f59e0b";
+    case "bug":
+      return "#ef4444";
+    case "feedback":
+      return "#06b6d4";
+    default:
+      return "#71717a";
   }
 }
 
-function getLabelDisplayName(name: string, t: (key: string) => string): string {
+function getLabelDisplayName(
+  name: string,
+  t: (key: keyof Messages) => string,
+): string {
   switch (name) {
-    case "enhancement": return t("fbList.label.enhancement");
-    case "bug": return t("fbList.label.bug");
-    case "feedback": return t("fbList.label.feedback");
-    default: return name;
+    case "enhancement":
+      return t("fbList.label.enhancement");
+    case "bug":
+      return t("fbList.label.bug");
+    case "feedback":
+      return t("fbList.label.feedback");
+    default:
+      return name;
   }
 }
 
 // ── 子组件 ──
 
 /** 状态徽章：open / completed / not_planned / duplicate */
-function StateBadge({ state, closeReason, t }: { state: string; closeReason: CloseReason; t: (key: string) => string }) {
+function StateBadge({
+  state,
+  closeReason,
+  t,
+}: {
+  state: string;
+  closeReason: CloseReason;
+  t: (key: keyof Messages) => string;
+}) {
   if (state === "open") {
     return (
       <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-success/15 text-success border border-success/30 shrink-0">
@@ -208,9 +228,21 @@ function StateBadge({ state, closeReason, t }: { state: string; closeReason: Clo
 /** Reactions 行 */
 function ReactionsBar({ reactions }: { reactions: Reactions }) {
   const items: { emoji: React.ReactNode; count: number; key: string }[] = [
-    { emoji: <ThumbsUp className="w-3 h-3" />, count: reactions["+1"], key: "+1" },
-    { emoji: <Heart className="w-3 h-3" />, count: reactions.heart, key: "heart" },
-    { emoji: <Rocket className="w-3 h-3" />, count: reactions.rocket, key: "rocket" },
+    {
+      emoji: <ThumbsUp className="w-3 h-3" />,
+      count: reactions["+1"],
+      key: "+1",
+    },
+    {
+      emoji: <Heart className="w-3 h-3" />,
+      count: reactions.heart,
+      key: "heart",
+    },
+    {
+      emoji: <Rocket className="w-3 h-3" />,
+      count: reactions.rocket,
+      key: "rocket",
+    },
     { emoji: <Eye className="w-3 h-3" />, count: reactions.eyes, key: "eyes" },
     { emoji: "🎉", count: reactions.hooray, key: "hooray" },
     { emoji: "😄", count: reactions.laugh, key: "laugh" },
@@ -237,9 +269,17 @@ function ReactionsBar({ reactions }: { reactions: Reactions }) {
 }
 
 /** 结构化元数据展示（type / contact / submitted_at） */
-function MetadataBar({ metadata, locale, t }: { metadata: ParsedMetadata; locale: string; t: (key: string) => string }) {
+function MetadataBar({
+  metadata,
+  locale,
+  t,
+}: {
+  metadata: ParsedMetadata;
+  locale: string;
+  t: (key: keyof Messages) => string;
+}) {
   const typeLabel = metadata.type
-    ? t(`issueDetail.meta.type.${metadata.type}`)
+    ? t(`issueDetail.meta.type.${metadata.type}` as keyof Messages)
     : null;
 
   const submittedLabel = metadata.submitted_at
@@ -250,7 +290,9 @@ function MetadataBar({ metadata, locale, t }: { metadata: ParsedMetadata; locale
     <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 px-4 py-2.5 border-t border-dark-border text-[11px] text-dark-text-muted">
       {typeLabel && (
         <span className="flex items-center gap-1">
-          <span className="text-dark-text-secondary font-medium">{t("issueDetail.meta.typeLabel")}</span>
+          <span className="text-dark-text-secondary font-medium">
+            {t("issueDetail.meta.typeLabel")}
+          </span>
           {typeLabel}
         </span>
       )}
@@ -277,7 +319,10 @@ interface IssueDetailModalProps {
   onClose: () => void;
 }
 
-export default function IssueDetailModal({ issueNumber, onClose }: IssueDetailModalProps) {
+export default function IssueDetailModal({
+  issueNumber,
+  onClose,
+}: IssueDetailModalProps) {
   const { t, locale } = useLocale();
   const [data, setData] = useState<IssueDetailResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -285,31 +330,36 @@ export default function IssueDetailModal({ issueNumber, onClose }: IssueDetailMo
   const overlayRef = useRef<HTMLDivElement>(null);
 
   const [replyBody, setReplyBody] = useState("");
-  const [replyStatus, setReplyStatus] = useState<"idle" | "sending" | "success" | "error">("idle");
+  const [replyStatus, setReplyStatus] = useState<
+    "idle" | "sending" | "success" | "error"
+  >("idle");
   const [replyError, setReplyError] = useState("");
 
-  const fetchDetail = useCallback(async (num: number) => {
-    setLoading(true);
-    setError("");
-    setData(null);
+  const fetchDetail = useCallback(
+    async (num: number) => {
+      setLoading(true);
+      setError("");
+      setData(null);
 
-    try {
-      const res = await fetch(`/api/issues/${num}`);
-      if (!res.ok) {
-        if (res.status === 404) {
-          setError(t("issueDetail.notFound"));
-          return;
+      try {
+        const res = await fetch(`/api/issues/${num}`);
+        if (!res.ok) {
+          if (res.status === 404) {
+            setError(t("issueDetail.notFound"));
+            return;
+          }
+          throw new Error(`HTTP ${res.status}`);
         }
-        throw new Error(`HTTP ${res.status}`);
+        const json: IssueDetailResponse = await res.json();
+        setData(json);
+      } catch {
+        setError(t("issueDetail.error"));
+      } finally {
+        setLoading(false);
       }
-      const json: IssueDetailResponse = await res.json();
-      setData(json);
-    } catch {
-      setError(t("issueDetail.error"));
-    } finally {
-      setLoading(false);
-    }
-  }, [t]);
+    },
+    [t],
+  );
 
   useEffect(() => {
     if (issueNumber !== null) {
@@ -449,7 +499,11 @@ export default function IssueDetailModal({ issueNumber, onClose }: IssueDetailMo
                   <div className="mb-6">
                     <div className="flex items-start gap-2 mb-3">
                       <div className="shrink-0 mt-0.5">
-                        <StateBadge state={data.issue.state} closeReason={data.issue.close_reason} t={t} />
+                        <StateBadge
+                          state={data.issue.state}
+                          closeReason={data.issue.close_reason}
+                          t={t}
+                        />
                       </div>
                       <h2 className="text-lg font-bold text-dark-text leading-snug">
                         {data.issue.title}
@@ -515,7 +569,11 @@ export default function IssueDetailModal({ issueNumber, onClose }: IssueDetailMo
 
                     {/* Structured metadata (feedback format only) */}
                     {data.issue.is_feedback_format && data.issue.metadata && (
-                      <MetadataBar metadata={data.issue.metadata} locale={locale} t={t} />
+                      <MetadataBar
+                        metadata={data.issue.metadata}
+                        locale={locale}
+                        t={t}
+                      />
                     )}
 
                     <ReactionsBar reactions={data.issue.reactions} />
@@ -526,41 +584,51 @@ export default function IssueDetailModal({ issueNumber, onClose }: IssueDetailMo
                     <div className="space-y-4">
                       <h3 className="text-sm font-semibold text-dark-text flex items-center gap-1.5">
                         <MessageSquare className="w-4 h-4" />
-                        {t("issueDetail.commentsTitle").replace("{count}", String(data.comments.length))}
+                        {t("issueDetail.commentsTitle").replace(
+                          "{count}",
+                          String(data.comments.length),
+                        )}
                       </h3>
 
                       {data.comments.map((comment) => {
-                        const isDeveloper = comment.user.login !== data.issue.user.login;
+                        const isDeveloper =
+                          comment.user.login !== data.issue.user.login;
                         return (
-                        <motion.div
-                          key={comment.id}
-                          initial={{ opacity: 0, y: 8 }}
-                          animate={{ opacity: 1, y: 0 }}
-                          className="rounded-lg border border-dark-border bg-dark-surface1 overflow-hidden"
-                        >
-                          {/* Comment header */}
-                          <div className="flex items-center gap-2 px-4 py-2.5 bg-dark-surface2/50 border-b border-dark-border">
-                            <div className={`w-5 h-5 rounded-full flex items-center justify-center ${isDeveloper ? "bg-brand-blue/20" : "bg-dark-surface3"}`}>
-                              <User className={`w-3 h-3 ${isDeveloper ? "text-brand-blue" : "text-dark-text-muted"}`} />
+                          <motion.div
+                            key={comment.id}
+                            initial={{ opacity: 0, y: 8 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            className="rounded-lg border border-dark-border bg-dark-surface1 overflow-hidden"
+                          >
+                            {/* Comment header */}
+                            <div className="flex items-center gap-2 px-4 py-2.5 bg-dark-surface2/50 border-b border-dark-border">
+                              <div
+                                className={`w-5 h-5 rounded-full flex items-center justify-center ${isDeveloper ? "bg-brand-blue/20" : "bg-dark-surface3"}`}
+                              >
+                                <User
+                                  className={`w-3 h-3 ${isDeveloper ? "text-brand-blue" : "text-dark-text-muted"}`}
+                                />
+                              </div>
+                              <span className="text-xs font-medium text-dark-text">
+                                {isDeveloper
+                                  ? t("issueDetail.developer")
+                                  : t("issueDetail.anonymous")}
+                              </span>
+                              <span className="text-[11px] text-dark-text-muted">
+                                {formatTimeAgo(comment.created_at, locale)}
+                              </span>
                             </div>
-                            <span className="text-xs font-medium text-dark-text">
-                              {isDeveloper ? t("issueDetail.developer") : t("issueDetail.anonymous")}
-                            </span>
-                            <span className="text-[11px] text-dark-text-muted">
-                              {formatTimeAgo(comment.created_at, locale)}
-                            </span>
-                          </div>
 
-                          {/* Comment body */}
-                          <div
-                            className="px-4 py-3 changelog-body"
-                            dangerouslySetInnerHTML={{
-                              __html: renderMarkdown(comment.body),
-                            }}
-                          />
+                            {/* Comment body */}
+                            <div
+                              className="px-4 py-3 changelog-body"
+                              dangerouslySetInnerHTML={{
+                                __html: renderMarkdown(comment.body),
+                              }}
+                            />
 
-                          <ReactionsBar reactions={comment.reactions} />
-                        </motion.div>
+                            <ReactionsBar reactions={comment.reactions} />
+                          </motion.div>
                         );
                       })}
                     </div>
@@ -596,7 +664,9 @@ export default function IssueDetailModal({ issueNumber, onClose }: IssueDetailMo
 
                 <div className="flex items-center justify-between mt-2">
                   <span className="text-[10px] text-dark-text-muted">
-                    {t("issueDetail.replyCharCount", { count: String(replyBody.length) })}
+                    {t("issueDetail.replyCharCount", {
+                      count: String(replyBody.length),
+                    })}
                   </span>
 
                   <div className="flex items-center gap-2">

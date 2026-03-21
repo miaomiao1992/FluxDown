@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useLocale } from "@/lib/i18n";
 import { ANNOUNCEMENTS } from "@/lib/announcements";
+import type { Announcement } from "@/lib/announcements";
 
 const STORAGE_KEY = "fluxdown-dismissed-announcements";
 
@@ -29,7 +30,9 @@ export default function AnnouncementBar() {
 
   useEffect(() => {
     const dismissed = getDismissed();
-    const active = ANNOUNCEMENTS.find((a) => a.active && !dismissed.includes(a.id));
+    const active = ANNOUNCEMENTS.find(
+      (a) => a.active && !dismissed.includes(a.id),
+    );
     if (active) {
       setCurrent(active);
       setVisible(true);
