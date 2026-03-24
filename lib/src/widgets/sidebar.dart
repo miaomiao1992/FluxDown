@@ -68,7 +68,6 @@ class _SidebarState extends State<Sidebar> {
         final ctrl = widget.controller;
         final s = LocaleScope.of(context);
         return Container(
-          width: 224,
           color: c.surface1,
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -182,7 +181,10 @@ class _SidebarState extends State<Sidebar> {
           expanded: _queuesExpanded,
           c: c,
           onToggle: () => setState(() => _queuesExpanded = !_queuesExpanded),
-          trailing: _QueueAddButton(c: c, onTap: () => _showCreateQueueDialog(context, ctrl, s, c)),
+          trailing: _QueueAddButton(
+            c: c,
+            onTap: () => _showCreateQueueDialog(context, ctrl, s, c),
+          ),
         ),
         if (_queuesExpanded) ...[
           const SizedBox(height: 4),
@@ -203,7 +205,8 @@ class _SidebarState extends State<Sidebar> {
               c: c,
               onTap: () => ctrl.setQueueFilter(queue.queueId),
               onEdit: () => _showEditQueueDialog(context, ctrl, s, c, queue),
-              onDelete: () => _showDeleteQueueDialog(context, ctrl, s, c, queue),
+              onDelete: () =>
+                  _showDeleteQueueDialog(context, ctrl, s, c, queue),
             ),
         ],
       ],
@@ -211,7 +214,12 @@ class _SidebarState extends State<Sidebar> {
   }
 
   // 新建队列对话框
-  void _showCreateQueueDialog(BuildContext context, DownloadController ctrl, S s, AppColors c) {
+  void _showCreateQueueDialog(
+    BuildContext context,
+    DownloadController ctrl,
+    S s,
+    AppColors c,
+  ) {
     final nameCtrl = TextEditingController();
     showShadDialog(
       context: context,
@@ -223,22 +231,36 @@ class _SidebarState extends State<Sidebar> {
         nameCtrl: nameCtrl,
         s: s,
         c: c,
-        onConfirm: (name, speedLimit, maxConcurrent, saveDir, defaultSegments, defaultUserAgent) {
-          ctrl.createQueue(
-            name: name,
-            speedLimitKbps: speedLimit,
-            maxConcurrent: maxConcurrent,
-            defaultSaveDir: saveDir,
-            defaultSegments: defaultSegments,
-            defaultUserAgent: defaultUserAgent,
-          );
-        },
+        onConfirm:
+            (
+              name,
+              speedLimit,
+              maxConcurrent,
+              saveDir,
+              defaultSegments,
+              defaultUserAgent,
+            ) {
+              ctrl.createQueue(
+                name: name,
+                speedLimitKbps: speedLimit,
+                maxConcurrent: maxConcurrent,
+                defaultSaveDir: saveDir,
+                defaultSegments: defaultSegments,
+                defaultUserAgent: defaultUserAgent,
+              );
+            },
       ),
     ).then((_) => nameCtrl.dispose());
   }
 
   // 编辑队列对话框
-  void _showEditQueueDialog(BuildContext context, DownloadController ctrl, S s, AppColors c, DownloadQueue queue) {
+  void _showEditQueueDialog(
+    BuildContext context,
+    DownloadController ctrl,
+    S s,
+    AppColors c,
+    DownloadQueue queue,
+  ) {
     final nameCtrl = TextEditingController(text: queue.name);
     showShadDialog(
       context: context,
@@ -255,23 +277,37 @@ class _SidebarState extends State<Sidebar> {
         initialSaveDir: queue.defaultSaveDir,
         initialDefaultSegments: queue.defaultSegments,
         initialUserAgent: queue.defaultUserAgent,
-        onConfirm: (name, speedLimit, maxConcurrent, saveDir, defaultSegments, defaultUserAgent) {
-          ctrl.updateQueue(
-            queueId: queue.queueId,
-            name: name,
-            speedLimitKbps: speedLimit,
-            maxConcurrent: maxConcurrent,
-            defaultSaveDir: saveDir,
-            defaultSegments: defaultSegments,
-            defaultUserAgent: defaultUserAgent,
-          );
-        },
+        onConfirm:
+            (
+              name,
+              speedLimit,
+              maxConcurrent,
+              saveDir,
+              defaultSegments,
+              defaultUserAgent,
+            ) {
+              ctrl.updateQueue(
+                queueId: queue.queueId,
+                name: name,
+                speedLimitKbps: speedLimit,
+                maxConcurrent: maxConcurrent,
+                defaultSaveDir: saveDir,
+                defaultSegments: defaultSegments,
+                defaultUserAgent: defaultUserAgent,
+              );
+            },
       ),
     ).then((_) => nameCtrl.dispose());
   }
 
   // 删除队列确认对话框
-  void _showDeleteQueueDialog(BuildContext context, DownloadController ctrl, S s, AppColors c, DownloadQueue queue) {
+  void _showDeleteQueueDialog(
+    BuildContext context,
+    DownloadController ctrl,
+    S s,
+    AppColors c,
+    DownloadQueue queue,
+  ) {
     showShadDialog(
       context: context,
       barrierColor: AppColors.of(context).dialogBarrier,
@@ -376,8 +412,7 @@ class _CollapsibleSectionHeader extends StatefulWidget {
       _CollapsibleSectionHeaderState();
 }
 
-class _CollapsibleSectionHeaderState
-    extends State<_CollapsibleSectionHeader> {
+class _CollapsibleSectionHeaderState extends State<_CollapsibleSectionHeader> {
   bool _isHovered = false;
 
   @override
@@ -636,8 +671,7 @@ class _QueueNavItemState extends State<_QueueNavItem> {
                   style: TextStyle(
                     fontSize: 12.5,
                     color: selected ? c.accent : c.textSecondary,
-                    fontWeight:
-                        selected ? FontWeight.w500 : FontWeight.normal,
+                    fontWeight: selected ? FontWeight.w500 : FontWeight.normal,
                   ),
                   overflow: TextOverflow.ellipsis,
                 ),
@@ -718,8 +752,7 @@ class _QueueActionIconState extends State<_QueueActionIcon> {
 
   @override
   Widget build(BuildContext context) {
-    final color =
-        widget.isDestructive ? AppColors.red : widget.c.textSecondary;
+    final color = widget.isDestructive ? AppColors.red : widget.c.textSecondary;
     return MouseRegion(
       cursor: SystemMouseCursors.click,
       onEnter: (_) => setState(() => _isHovered = true),
@@ -750,13 +783,17 @@ class _QueueActionIconState extends State<_QueueActionIcon> {
 /// key '' = 继承全局；其余 key 对应具体 UA 字符串
 const _kQueueUaPresets = {
   '': '', // 继承全局设置
-  'chrome': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+  'chrome':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
       '(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36',
-  'firefox': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:147.0) '
+  'firefox':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:147.0) '
       'Gecko/20100101 Firefox/147.0',
-  'edge': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+  'edge':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
       '(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36 Edg/145.0.3800.70',
-  'safari': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+  'safari':
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
       'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3.1 Safari/605.1.15',
   'netdisk': 'netdisk',
 };
@@ -780,7 +817,15 @@ class _QueueDialog extends StatefulWidget {
   final String initialSaveDir;
   final int initialDefaultSegments;
   final String initialUserAgent;
-  final void Function(String name, int speedLimit, int maxConcurrent, String saveDir, int defaultSegments, String defaultUserAgent) onConfirm;
+  final void Function(
+    String name,
+    int speedLimit,
+    int maxConcurrent,
+    String saveDir,
+    int defaultSegments,
+    String defaultUserAgent,
+  )
+  onConfirm;
 
   const _QueueDialog({
     required this.title,
@@ -813,10 +858,14 @@ class _QueueDialogState extends State<_QueueDialog> {
   void initState() {
     super.initState();
     _speedCtrl = TextEditingController(
-      text: widget.initialSpeedLimit > 0 ? widget.initialSpeedLimit.toString() : '',
+      text: widget.initialSpeedLimit > 0
+          ? widget.initialSpeedLimit.toString()
+          : '',
     );
     _concurrentCtrl = TextEditingController(
-      text: widget.initialMaxConcurrent > 0 ? widget.initialMaxConcurrent.toString() : '',
+      text: widget.initialMaxConcurrent > 0
+          ? widget.initialMaxConcurrent.toString()
+          : '',
     );
     _saveDirCtrl = TextEditingController(text: widget.initialSaveDir);
     _uaCtrl = TextEditingController(text: widget.initialUserAgent);
@@ -854,15 +903,24 @@ class _QueueDialogState extends State<_QueueDialog> {
     final name = widget.nameCtrl.text.trim();
     if (name.isEmpty) return;
     // 钳制到合法范围：速度 0-1073741824 KB/s，并发 0-100（0 = 使用全局设置）
-    final speedLimit =
-        (int.tryParse(_speedCtrl.text.trim()) ?? 0).clamp(0, 1 << 30);
-    final maxConcurrent =
-        (int.tryParse(_concurrentCtrl.text.trim()) ?? 0).clamp(0, 100);
+    final speedLimit = (int.tryParse(_speedCtrl.text.trim()) ?? 0).clamp(
+      0,
+      1 << 30,
+    );
+    final maxConcurrent = (int.tryParse(_concurrentCtrl.text.trim()) ?? 0)
+        .clamp(0, 100);
     final saveDir = _saveDirCtrl.text.trim();
     final defaultSegments = int.tryParse(_selectedSegments) ?? 0;
     final defaultUserAgent = _uaCtrl.text.trim();
     Navigator.of(context).pop();
-    widget.onConfirm(name, speedLimit, maxConcurrent, saveDir, defaultSegments, defaultUserAgent);
+    widget.onConfirm(
+      name,
+      speedLimit,
+      maxConcurrent,
+      saveDir,
+      defaultSegments,
+      defaultUserAgent,
+    );
   }
 
   @override
@@ -876,10 +934,7 @@ class _QueueDialogState extends State<_QueueDialog> {
           onPressed: () => Navigator.of(context).pop(),
           child: Text(s.cancel),
         ),
-        ShadButton(
-          onPressed: _confirm,
-          child: Text(s.confirm),
-        ),
+        ShadButton(onPressed: _confirm, child: Text(s.confirm)),
       ],
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 12),
@@ -889,7 +944,11 @@ class _QueueDialogState extends State<_QueueDialog> {
           children: [
             Text(
               s.queueNameLabel,
-              style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w500, color: c.textSecondary),
+              style: TextStyle(
+                fontSize: 11.5,
+                fontWeight: FontWeight.w500,
+                color: c.textSecondary,
+              ),
             ),
             const SizedBox(height: 6),
             ShadInput(
@@ -908,7 +967,11 @@ class _QueueDialogState extends State<_QueueDialog> {
                     children: [
                       Text(
                         s.queueSpeedLimit,
-                        style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w500, color: c.textSecondary),
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w500,
+                          color: c.textSecondary,
+                        ),
                       ),
                       const SizedBox(height: 6),
                       ShadInput(
@@ -926,7 +989,11 @@ class _QueueDialogState extends State<_QueueDialog> {
                     children: [
                       Text(
                         s.queueMaxConcurrent,
-                        style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w500, color: c.textSecondary),
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w500,
+                          color: c.textSecondary,
+                        ),
                       ),
                       const SizedBox(height: 6),
                       ShadInput(
@@ -944,7 +1011,11 @@ class _QueueDialogState extends State<_QueueDialog> {
                     children: [
                       Text(
                         s.queueDefaultSegments,
-                        style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w500, color: c.textSecondary),
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w500,
+                          color: c.textSecondary,
+                        ),
                       ),
                       const SizedBox(height: 6),
                       SizedBox(
@@ -952,13 +1023,23 @@ class _QueueDialogState extends State<_QueueDialog> {
                         child: ShadSelect<String>(
                           initialValue: _selectedSegments,
                           onChanged: (v) {
-                            if (v != null) setState(() => _selectedSegments = v);
+                            if (v != null)
+                              setState(() => _selectedSegments = v);
                           },
-                          options: _segmentOptions.map((opt) => ShadOption(
-                            value: opt,
-                            child: Text(opt == '0' ? s.queueDefaultSegmentsHint : opt),
-                          )).toList(),
-                          selectedOptionBuilder: (ctx, v) => Text(v == '0' ? s.queueDefaultSegmentsHint : v),
+                          options: _segmentOptions
+                              .map(
+                                (opt) => ShadOption(
+                                  value: opt,
+                                  child: Text(
+                                    opt == '0'
+                                        ? s.queueDefaultSegmentsHint
+                                        : opt,
+                                  ),
+                                ),
+                              )
+                              .toList(),
+                          selectedOptionBuilder: (ctx, v) =>
+                              Text(v == '0' ? s.queueDefaultSegmentsHint : v),
                         ),
                       ),
                     ],
@@ -969,7 +1050,11 @@ class _QueueDialogState extends State<_QueueDialog> {
             const SizedBox(height: 12),
             Text(
               s.queueDefaultUserAgent,
-              style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w500, color: c.textSecondary),
+              style: TextStyle(
+                fontSize: 11.5,
+                fontWeight: FontWeight.w500,
+                color: c.textSecondary,
+              ),
             ),
             const SizedBox(height: 6),
             Row(
@@ -979,13 +1064,34 @@ class _QueueDialogState extends State<_QueueDialog> {
                   child: ShadSelect<String>(
                     initialValue: _selectedUaPreset,
                     options: [
-                      ShadOption(value: '', child: Text(s.queueUaInheritGlobal)),
-                      ShadOption(value: 'chrome', child: Text(s.userAgentPresetChrome)),
-                      ShadOption(value: 'firefox', child: Text(s.userAgentPresetFirefox)),
-                      ShadOption(value: 'edge', child: Text(s.userAgentPresetEdge)),
-                      ShadOption(value: 'safari', child: Text(s.userAgentPresetSafari)),
-                      ShadOption(value: 'netdisk', child: Text(s.userAgentPresetNetdisk)),
-                      ShadOption(value: 'custom', child: Text(s.userAgentPresetCustom)),
+                      ShadOption(
+                        value: '',
+                        child: Text(s.queueUaInheritGlobal),
+                      ),
+                      ShadOption(
+                        value: 'chrome',
+                        child: Text(s.userAgentPresetChrome),
+                      ),
+                      ShadOption(
+                        value: 'firefox',
+                        child: Text(s.userAgentPresetFirefox),
+                      ),
+                      ShadOption(
+                        value: 'edge',
+                        child: Text(s.userAgentPresetEdge),
+                      ),
+                      ShadOption(
+                        value: 'safari',
+                        child: Text(s.userAgentPresetSafari),
+                      ),
+                      ShadOption(
+                        value: 'netdisk',
+                        child: Text(s.userAgentPresetNetdisk),
+                      ),
+                      ShadOption(
+                        value: 'custom',
+                        child: Text(s.userAgentPresetCustom),
+                      ),
                     ],
                     selectedOptionBuilder: (ctx, v) {
                       final label = switch (v) {
@@ -997,7 +1103,11 @@ class _QueueDialogState extends State<_QueueDialog> {
                         'custom' => s.userAgentPresetCustom,
                         _ => s.queueUaInheritGlobal,
                       };
-                      return Text(label, overflow: TextOverflow.ellipsis, maxLines: 1);
+                      return Text(
+                        label,
+                        overflow: TextOverflow.ellipsis,
+                        maxLines: 1,
+                      );
                     },
                     onChanged: _onUaPresetChanged,
                   ),
@@ -1040,7 +1150,7 @@ class _UpdateFooter extends StatelessWidget {
           children: [
             if (status == UpdateStatus.downloading) _buildProgressBar(svc, c),
             Container(
-              height: 32,
+              height: 28,
               padding: const EdgeInsets.symmetric(horizontal: 12),
               decoration: BoxDecoration(
                 border: Border(top: BorderSide(color: c.border, width: 1)),

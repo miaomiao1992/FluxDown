@@ -325,10 +325,11 @@ class _HomePageState extends State<HomePage> {
                   width: _sidebarWidth,
                   child: Sidebar(controller: _controller),
                 ),
-                // Sidebar resize handle — 从 titlebar 下方开始
+                // Sidebar resize handle — header 区域保持 1px 静态边框，下方可交互
                 Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const SizedBox(height: 48),
+                    Container(height: 48, width: 1, color: c.border),
                     Expanded(
                       child: _ResizeHandle(
                         color: c.border,
@@ -434,7 +435,7 @@ class _HomePageState extends State<HomePage> {
             // HeaderBar — 独立于内容区，不受 DetailPanel 宽度影响
             Positioned(
               top: 0,
-              left: _sidebarWidth,
+              left: _sidebarWidth + 1,
               right: 0,
               height: 48,
               child: HeaderBar(
