@@ -501,11 +501,11 @@ const zhCN: Messages = {
     "如果您对本服务条款有任何疑问，请通过我们网站的反馈页面与我们联系。",
 
   // Sponsor (plans are fetched dynamically from Afdian API)
-  "sponsor.badge": "开源支持",
+  "sponsor.badge": "支持",
   "sponsor.title": "赞助 ",
   "sponsor.titleHighlight": "FluxDown",
   "sponsor.subtitle":
-    "FluxDown 是完全免费的开源项目。您的赞助将持续推动开发进程，让项目保持活力。",
+    "FluxDown 是完全免费项目。您的赞助将持续推动开发进程，让项目保持活力。",
   "sponsor.cta": "前往爱发电赞助",
   "sponsor.ctaHint": "通过爱发电平台安全支付，支持微信 / 支付宝",
   "sponsor.sponsors": "感谢赞助者",
