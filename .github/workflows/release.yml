@@ -139,6 +139,14 @@ jobs:
         run: rinf gen
 
       # ── Build ──
+      - name: Pre-build Rust hub (debug cargo output)
+        shell: bash
+        run: |
+          cd native/hub
+          echo "::group::Cargo build (cdylib) verbose output"
+          cargo build --release --lib --verbose 2>&1 || echo "::error::Cargo build failed with exit code $?"
+          echo "::endgroup::"
+
       - name: Build Flutter Windows app
         # Windows 使用 native-tls（Schannel），无需 aws-lc-sys，无需任何额外 TLS 环境变量
         run: flutter build windows --release --build-name=${{ steps.version.outputs.VERSION }} --build-number=1 --dart-define=APP_VERSION=${{ steps.version.outputs.VERSION }}
