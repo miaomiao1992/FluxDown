@@ -401,6 +401,9 @@ const zhCN: Messages = {
   "fbList.empty": "暂无反馈。",
   "fbList.prev": "上一页",
   "fbList.next": "下一页",
+  "fbList.searchPlaceholder": "搜索标题、内容或 #编号...",
+  "fbList.searchEmpty": "未找到匹配「{query}」的 Issue。",
+  "fbList.searchClear": "清除搜索",
 
   // Issue Detail
   "issueDetail.open": "待处理",

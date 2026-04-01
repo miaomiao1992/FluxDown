@@ -219,6 +219,7 @@ async function fetchFilteredIssues(state: string): Promise<FilteredIssue[]> {
 export const GET: APIRoute = async ({ url }) => {
   const stateParam = url.searchParams.get("state")?.trim() || "all";
   const labelParam = url.searchParams.get("label")?.trim() || "";
+  const query = url.searchParams.get("q")?.trim() || "";
   const page = Math.max(
     1,
     parseInt(url.searchParams.get("page") || "1", 10) || 1,
@@ -250,6 +251,17 @@ export const GET: APIRoute = async ({ url }) => {
     if (labelParam) {
       issues = issues.filter((issue) =>
         issue.labels.some((l) => l.name === labelParam),
+      );
+    }
+
+    // 搜索关键词过滤（title、body_preview、issue number）
+    if (query) {
+      const q = query.toLowerCase();
+      issues = issues.filter(
+        (issue) =>
+          String(issue.number).includes(q) ||
+          issue.title.toLowerCase().includes(q) ||
+          issue.body_preview.toLowerCase().includes(q),
       );
     }
 

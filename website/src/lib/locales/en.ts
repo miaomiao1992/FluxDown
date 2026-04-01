@@ -415,6 +415,9 @@ const en = {
   "fbList.empty": "No feedback found.",
   "fbList.prev": "Prev",
   "fbList.next": "Next",
+  "fbList.searchPlaceholder": "Search title, content or #number...",
+  "fbList.searchEmpty": 'No issues found matching "{query}".',
+  "fbList.searchClear": "Clear search",
 
   // Issue Detail
   "issueDetail.open": "Open",

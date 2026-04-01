@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { motion } from "framer-motion";
 import {
   CircleDot,
@@ -13,6 +13,8 @@ import {
   ChevronRight,
   ChevronsUpDown,
   Filter,
+  Search,
+  X,
 } from "lucide-react";
 import { ThemeProvider, Label, Spinner, Flash } from "@primer/react";
 import { useLocale } from "@/lib/i18n";
@@ -27,6 +29,7 @@ interface ViewConfig {
   filter: string;
   visibleFields: string[];
   groupByField: string | null;
+  hasGroupBy: boolean;
 }
 
 interface BoardItem {
@@ -68,6 +71,17 @@ interface BoardData {
 
 interface ProjectBoardSectionProps {
   onIssueClick?: (issueNumber: number) => void;
+}
+
+// ── 搜索工具函数 ──
+
+function matchesSearch(item: BoardItem, q: string): boolean {
+  if (!q) return true;
+  const lower = q.toLowerCase();
+  return (
+    String(item.issueNumber).includes(lower) ||
+    item.title.toLowerCase().includes(lower)
+  );
 }
 
 // ── GitHub 颜色映射 ──
@@ -394,7 +408,7 @@ const TABLE_COLS: Array<{
   sortable: boolean;
   align?: "right";
 }> = [
-  { key: "#", label: "#", sortable: false },
+  { key: "number", label: "#", sortable: true },
   { key: "title", label: "Title", sortable: true },
   { key: "status", label: "Status", sortable: true },
   { key: "labels", label: "Labels", sortable: false },
@@ -520,11 +534,13 @@ function TableView({
   view,
   data,
   locale,
+  searchQuery,
   onIssueClick,
 }: {
   view: ViewConfig;
   data: BoardData;
   locale: string;
+  searchQuery: string;
   onIssueClick?: (issueNumber: number) => void;
 }) {
   const isLight = useIsLight();
@@ -532,31 +548,38 @@ function TableView({
 
   const STORAGE_KEY = `fluxdown-board-sort-${view.id}`;
 
+  const defaultSort = view.hasGroupBy ? "status" : "number";
+  const defaultDir: SortDir = view.hasGroupBy ? "ASC" : "DESC";
+
   const [sortField, setSortField] = useState<string>(() => {
-    if (typeof window === "undefined") return "status";
+    if (typeof window === "undefined") return defaultSort;
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
       if (saved)
         return (JSON.parse(saved) as { field: string; dir: SortDir }).field;
     } catch {}
-    return "status";
+    return defaultSort;
   });
   const [sortDir, setSortDir] = useState<SortDir>(() => {
-    if (typeof window === "undefined") return "ASC";
+    if (typeof window === "undefined") return defaultDir;
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
       if (saved)
         return (JSON.parse(saved) as { field: string; dir: SortDir }).dir;
     } catch {}
-    return "ASC";
+    return defaultDir;
   });
   // 记录每个分组的折叠状态，key = statusId（或 "__none__"）
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
 
-  // 过滤
+  // 过滤（视图过滤 + 搜索关键词）
   const filteredItems = useMemo(
-    () => data.allItems.filter((item) => parseFilter(view.filter, item)),
-    [data.allItems, view.filter],
+    () =>
+      data.allItems.filter(
+        (item) =>
+          parseFilter(view.filter, item) && matchesSearch(item, searchQuery),
+      ),
+    [data.allItems, view.filter, searchQuery],
   );
 
   // Status 选项顺序索引（由 data.columns 定义，与 GitHub Projects 完全一致）
@@ -588,6 +611,9 @@ function TableView({
         case "comments":
           cmp = a.comments - b.comments;
           break;
+        case "number":
+          cmp = a.issueNumber - b.issueNumber;
+          break;
         default:
           cmp = 0;
       }
@@ -596,9 +622,13 @@ function TableView({
     return copy;
   }, [filteredItems, sortField, sortDir, statusOrder]);
 
+  // 是否启用分组：视图配置了 Group by 且用户当前按 status 排序
+  const groupingEnabled = view.hasGroupBy && sortField === "status";
+
   // 按 Status 分组，顺序与 data.columns 保持一致；
   // 当排序字段为 "status" 时，分组顺序随 sortDir 同步反转
   const groups = useMemo(() => {
+    if (!groupingEnabled) return [];
     // 建立 statusId → items 映射
     const itemsByStatus = new Map<string, BoardItem[]>();
     const noStatusItems: BoardItem[] = [];
@@ -722,7 +752,7 @@ function TableView({
                   {t("board.empty")}
                 </td>
               </tr>
-            ) : (
+            ) : groupingEnabled ? (
               groups.map((group) => {
                 const isCollapsed = !!collapsed[group.id];
                 const colColor =
@@ -776,6 +806,17 @@ function TableView({
                   </>
                 );
               })
+            ) : (
+              sortedItems.map((item, idx) => (
+                <TableRow
+                  key={item.id}
+                  item={item}
+                  rowNum={idx + 1}
+                  locale={locale}
+                  isLight={isLight}
+                  onIssueClick={onIssueClick}
+                />
+              ))
             )}
           </tbody>
         </table>
@@ -790,11 +831,13 @@ function BoardView({
   view,
   data,
   locale,
+  searchQuery,
   onIssueClick,
 }: {
   view: ViewConfig;
   data: BoardData;
   locale: string;
+  searchQuery: string;
   onIssueClick?: (issueNumber: number) => void;
 }) {
   const { t } = useLocale();
@@ -827,13 +870,17 @@ function BoardView({
         id: col.id,
         name: col.name,
         color: col.color,
-        items: col.items.filter((item) => parseFilter(view.filter, item)),
+        items: col.items.filter(
+          (item) =>
+            parseFilter(view.filter, item) && matchesSearch(item, searchQuery),
+        ),
       }));
     }
 
-    // 过滤 items
-    const filtered = data.allItems.filter((item) =>
-      parseFilter(view.filter, item),
+    // 过滤 items（视图过滤 + 搜索关键词）
+    const filtered = data.allItems.filter(
+      (item) =>
+        parseFilter(view.filter, item) && matchesSearch(item, searchQuery),
     );
 
     // 按 groupField 的 options 顺序分组
@@ -864,7 +911,7 @@ function BoardView({
     }
 
     return result;
-  }, [data, groupField, groupByFieldName, view.filter, t]);
+  }, [data, groupField, groupByFieldName, view.filter, searchQuery, t]);
 
   const totalFiltered = groupColumns.reduce(
     (acc, c) => acc + c.items.length,
@@ -939,10 +986,12 @@ function BoardView({
 function FallbackBoardView({
   data,
   locale,
+  searchQuery,
   onIssueClick,
 }: {
   data: BoardData;
   locale: string;
+  searchQuery: string;
   onIssueClick?: (issueNumber: number) => void;
 }) {
   const { t } = useLocale();
@@ -959,7 +1008,10 @@ function FallbackBoardView({
           },
         ]
       : []),
-  ];
+  ].map((col) => ({
+    ...col,
+    items: col.items.filter((item) => matchesSearch(item, searchQuery)),
+  }));
 
   return (
     <div className="overflow-x-auto scrollbar-none pb-4">
@@ -1022,7 +1074,24 @@ export default function ProjectBoardSection({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [activeViewIdx, setActiveViewIdx] = useState(0);
+  const [searchInput, setSearchInput] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+  const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const { t, locale } = useLocale();
+
+  const handleSearchChange = (value: string) => {
+    setSearchInput(value);
+    if (debounceTimer.current) clearTimeout(debounceTimer.current);
+    debounceTimer.current = setTimeout(() => {
+      setSearchQuery(value.trim());
+    }, 400);
+  };
+
+  const handleSearchClear = () => {
+    setSearchInput("");
+    setSearchQuery("");
+    if (debounceTimer.current) clearTimeout(debounceTimer.current);
+  };
 
   useEffect(() => {
     fetch("/api/project-board")
@@ -1038,30 +1107,37 @@ export default function ProjectBoardSection({
 
   const hasViews = Array.isArray(data.views) && data.views.length > 0;
 
-  // ── 标题区域（共用） ──
-  const HeaderArea = () => (
-    <div className="text-center mb-8 px-4">
-      <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-dark-surface2 border border-dark-border text-xs text-brand-sky mb-4">
-        <Kanban size={13} />
-        <span>{data.projectTitle}</span>
-      </div>
-      <h2 className="text-3xl font-bold text-dark-text mb-2">
-        {t("board.issueCount", { n: String(data.totalItems) })}
-      </h2>
-      <p className="text-dark-text-secondary text-sm">{data.projectTitle}</p>
-    </div>
-  );
-
   // ── Fallback：无 views 数据时 ──
   if (!hasViews) {
     return (
       <ThemeProvider colorMode="night">
         <div style={themeVars}>
           <section className="py-16 bg-dark-bg">
-            <HeaderArea />
+            <div className="max-w-screen-2xl mx-auto px-4 sm:px-8 mb-4">
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-dark-text-muted pointer-events-none" />
+                <input
+                  type="text"
+                  value={searchInput}
+                  onChange={(e) => handleSearchChange(e.target.value)}
+                  placeholder={t("fbList.searchPlaceholder")}
+                  className="w-full pl-9 pr-9 py-2 rounded-lg bg-dark-surface1 border border-dark-border text-sm text-dark-text placeholder-dark-text-muted focus:outline-none focus:border-brand-sky/50 focus:ring-1 focus:ring-brand-sky/20 transition-all"
+                />
+                {searchInput && (
+                  <button
+                    onClick={handleSearchClear}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 p-0.5 rounded text-dark-text-muted hover:text-dark-text transition-colors cursor-pointer"
+                    title={t("fbList.searchClear")}
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+            </div>
             <FallbackBoardView
               data={data}
               locale={locale}
+              searchQuery={searchQuery}
               onIssueClick={onIssueClick}
             />
           </section>
@@ -1078,9 +1154,6 @@ export default function ProjectBoardSection({
     <ThemeProvider colorMode="night">
       <div style={themeVars}>
         <section className="py-16 bg-dark-bg">
-          {/* 标题区域 */}
-          <HeaderArea />
-
           {/* 视图标签页 */}
           <div className="max-w-screen-2xl mx-auto px-4 sm:px-8 mb-6">
             <div className="flex items-end gap-0 border-b border-dark-border overflow-x-auto scrollbar-none">
@@ -1107,6 +1180,29 @@ export default function ProjectBoardSection({
             </div>
           </div>
 
+          {/* 搜索框 */}
+          <div className="max-w-screen-2xl mx-auto px-4 sm:px-8 mb-4">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-dark-text-muted pointer-events-none" />
+              <input
+                type="text"
+                value={searchInput}
+                onChange={(e) => handleSearchChange(e.target.value)}
+                placeholder={t("fbList.searchPlaceholder")}
+                className="w-full pl-9 pr-9 py-2 rounded-lg bg-dark-surface1 border border-dark-border text-sm text-dark-text placeholder-dark-text-muted focus:outline-none focus:border-brand-sky/50 focus:ring-1 focus:ring-brand-sky/20 transition-all"
+              />
+              {searchInput && (
+                <button
+                  onClick={handleSearchClear}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 p-0.5 rounded text-dark-text-muted hover:text-dark-text transition-colors cursor-pointer"
+                  title={t("fbList.searchClear")}
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+          </div>
+
           {/* 视图内容 */}
           <motion.div
             key={activeView.id}
@@ -1119,6 +1215,7 @@ export default function ProjectBoardSection({
                 view={activeView}
                 data={data}
                 locale={locale}
+                searchQuery={searchQuery}
                 onIssueClick={onIssueClick}
               />
             ) : (
@@ -1126,6 +1223,7 @@ export default function ProjectBoardSection({
                 view={activeView}
                 data={data}
                 locale={locale}
+                searchQuery={searchQuery}
                 onIssueClick={onIssueClick}
               />
             )}

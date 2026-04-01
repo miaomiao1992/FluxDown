@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   ListFilter,
@@ -16,6 +16,8 @@ import {
   Bug,
   MessageCircle,
   Tag,
+  Search,
+  X,
 } from "lucide-react";
 import { useLocale } from "@/lib/i18n";
 import type { Messages } from "@/lib/locales";
@@ -138,11 +140,14 @@ export default function FeedbackListSection({
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(false);
   const [totalShown, setTotalShown] = useState(0);
+  const [searchInput, setSearchInput] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+  const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const PER_PAGE = 15;
 
   const fetchIssues = useCallback(
-    async (state: StateFilter, label: LabelFilter, p: number) => {
+    async (state: StateFilter, label: LabelFilter, p: number, q: string) => {
       setLoading(true);
       setError("");
 
@@ -153,6 +158,7 @@ export default function FeedbackListSection({
           per_page: String(PER_PAGE),
         });
         if (label) params.set("label", label);
+        if (q) params.set("q", q);
 
         const res = await fetch(`/api/issues?${params}`);
         if (!res.ok) {
@@ -173,8 +179,8 @@ export default function FeedbackListSection({
   );
 
   useEffect(() => {
-    fetchIssues(stateFilter, labelFilter, page);
-  }, [stateFilter, labelFilter, page, fetchIssues]);
+    fetchIssues(stateFilter, labelFilter, page, searchQuery);
+  }, [stateFilter, labelFilter, page, searchQuery, fetchIssues]);
 
   const handleStateChange = (state: StateFilter) => {
     setStateFilter(state);
@@ -184,6 +190,22 @@ export default function FeedbackListSection({
   const handleLabelChange = (label: LabelFilter) => {
     setLabelFilter(label);
     setPage(1);
+  };
+
+  const handleSearchChange = (value: string) => {
+    setSearchInput(value);
+    if (debounceTimer.current) clearTimeout(debounceTimer.current);
+    debounceTimer.current = setTimeout(() => {
+      setSearchQuery(value.trim());
+      setPage(1);
+    }, 400);
+  };
+
+  const handleSearchClear = () => {
+    setSearchInput("");
+    setSearchQuery("");
+    setPage(1);
+    if (debounceTimer.current) clearTimeout(debounceTimer.current);
   };
 
   const totalPages = Math.ceil(totalShown / PER_PAGE);
@@ -212,6 +234,35 @@ export default function FeedbackListSection({
           <p className="mt-3 text-dark-text-secondary text-base">
             {t("fbList.subtitle")}
           </p>
+        </motion.div>
+
+        {/* Search */}
+        <motion.div
+          className="mb-4"
+          initial={{ opacity: 0, y: 10 }}
+          whileInView={{ opacity: 1, y: 0 }}
+          viewport={{ once: true }}
+          transition={{ duration: 0.4, delay: 0.08 }}
+        >
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-dark-text-muted pointer-events-none" />
+            <input
+              type="text"
+              value={searchInput}
+              onChange={(e) => handleSearchChange(e.target.value)}
+              placeholder={t("fbList.searchPlaceholder")}
+              className="w-full pl-9 pr-9 py-2 rounded-lg bg-dark-surface1 border border-dark-border text-sm text-dark-text placeholder-dark-text-muted focus:outline-none focus:border-brand-sky/50 focus:ring-1 focus:ring-brand-sky/20 transition-all"
+            />
+            {searchInput && (
+              <button
+                onClick={handleSearchClear}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 p-0.5 rounded text-dark-text-muted hover:text-dark-text transition-colors cursor-pointer"
+                title={t("fbList.searchClear")}
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
         </motion.div>
 
         {/* Filters */}
@@ -321,7 +372,19 @@ export default function FeedbackListSection({
                 className="flex flex-col items-center justify-center py-16 text-dark-text-secondary"
               >
                 <MessageSquare className="w-10 h-10 mb-3 opacity-30" />
-                <span className="text-sm">{t("fbList.empty")}</span>
+                <span className="text-sm">
+                  {searchQuery
+                    ? t("fbList.searchEmpty").replace("{query}", searchQuery)
+                    : t("fbList.empty")}
+                </span>
+                {searchQuery && (
+                  <button
+                    onClick={handleSearchClear}
+                    className="mt-3 text-xs text-brand-sky hover:text-brand-cyan transition-colors cursor-pointer"
+                  >
+                    {t("fbList.searchClear")}
+                  </button>
+                )}
               </motion.div>
             ) : (
               <motion.div

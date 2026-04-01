@@ -41,6 +41,8 @@ interface ViewConfig {
   /** 可见字段名列表 */
   visibleFields: string[];
   groupByField: string | null;
+  /** 视图是否配置了 Group by（totalCount > 0）*/
+  hasGroupBy: boolean;
 }
 
 interface ProjectMeta {
@@ -116,6 +118,9 @@ interface GQLView {
   filter: string | null;
   fields: {
     nodes: GQLViewField[];
+  };
+  groupByFields: {
+    totalCount: number;
   };
 }
 
@@ -229,7 +234,9 @@ const QUERY_PROJECT_META_AND_VIEWS = `
                 }
               }
             }
-
+            groupByFields(first: 1) {
+              totalCount
+            }
           }
         }
       }
@@ -330,6 +337,7 @@ function mapGQLViewToViewConfig(
     filter: view.filter ?? "",
     visibleFields,
     groupByField: inferredGroupBy,
+    hasGroupBy: (view.groupByFields?.totalCount ?? 0) > 0,
   };
 }
 
