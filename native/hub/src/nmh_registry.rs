@@ -157,16 +157,24 @@ mod inner {
         Ok((chromium_path, firefox_path))
     }
 
+    /// Chromium-family registry paths on Windows.
+    ///
+    /// Brave, Vivaldi, Opera and most other Chromium forks fall back to reading
+    /// Chrome's `Software\Google\Chrome\NativeMessagingHosts` registry key when
+    /// their own key is absent (verified via KeePassXC source and Chromium
+    /// source).  Only Chrome and Edge need dedicated keys.
+    const CHROMIUM_REG_PATHS: &[&str] = &[
+        r"Software\Google\Chrome\NativeMessagingHosts",
+        r"Software\Microsoft\Edge\NativeMessagingHosts",
+    ];
+
     /// Register each browser's registry key pointing to its dedicated manifest.
     /// Chrome and Edge use the Chromium manifest; Firefox uses the Firefox-only manifest.
+    /// Other Chromium browsers (Brave, Vivaldi, Opera) fall back to Chrome's key.
     fn register_registry(chromium_manifest: &str, firefox_manifest: &str) -> Result<(), io::Error> {
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
 
-        let chromium_paths = &[
-            r"Software\Google\Chrome\NativeMessagingHosts",
-            r"Software\Microsoft\Edge\NativeMessagingHosts",
-        ];
-        for reg_path in chromium_paths {
+        for reg_path in CHROMIUM_REG_PATHS {
             let full_path = format!("{}\\{}", reg_path, NMH_NAME);
             let (key, _) = hkcu.create_subkey_with_flags(&full_path, KEY_WRITE)?;
             key.set_value("", &chromium_manifest)?;
@@ -238,11 +246,8 @@ mod inner {
         // ---------------------
 
         // Check Chrome and Edge point to the Chromium manifest with the correct path.
-        let chromium_reg_paths = &[
-            r"Software\Google\Chrome\NativeMessagingHosts",
-            r"Software\Microsoft\Edge\NativeMessagingHosts",
-        ];
-        for reg_path in chromium_reg_paths {
+        // Other Chromium browsers (Brave, Vivaldi, Opera) fall back to Chrome's key.
+        for reg_path in CHROMIUM_REG_PATHS {
             let full_path = format!("{}\\{}", reg_path, NMH_NAME);
             let Ok(key) = hkcu.open_subkey_with_flags(&full_path, KEY_READ) else {
                 return true;
@@ -315,18 +320,21 @@ mod inner {
     pub fn unregister() -> Result<(), io::Error> {
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
 
-        let all_reg_paths = &[
-            r"Software\Google\Chrome\NativeMessagingHosts",
-            r"Software\Microsoft\Edge\NativeMessagingHosts",
-            r"Software\Mozilla\NativeMessagingHosts",
-        ];
-        for reg_path in all_reg_paths {
+        // Remove all Chromium-family browser registry keys
+        for reg_path in CHROMIUM_REG_PATHS {
             match hkcu.open_subkey_with_flags(reg_path, KEY_WRITE) {
                 Ok(parent) => {
                     let _ = parent.delete_subkey(NMH_NAME);
                 }
                 Err(_) => continue,
             }
+        }
+        // Remove Firefox registry key
+        match hkcu.open_subkey_with_flags(r"Software\Mozilla\NativeMessagingHosts", KEY_WRITE) {
+            Ok(parent) => {
+                let _ = parent.delete_subkey(NMH_NAME);
+            }
+            Err(_) => {}
         }
 
         // Remove both manifest files if NMH exe is found.
@@ -399,10 +407,18 @@ mod inner {
         let var_app = home.join(".var").join("app");
         let snap = home.join("snap");
         vec![
-            // Standard deb/rpm/tar.gz installs
+            // ── Standard deb/rpm/tar.gz installs ──
             config.join("google-chrome").join("NativeMessagingHosts"),
             config.join("chromium").join("NativeMessagingHosts"),
             config.join("microsoft-edge").join("NativeMessagingHosts"),
+            // Brave Browser (verified via KeePassXC source)
+            config
+                .join("BraveSoftware")
+                .join("Brave-Browser")
+                .join("NativeMessagingHosts"),
+            // Vivaldi (verified via KeePassXC source)
+            config.join("vivaldi").join("NativeMessagingHosts"),
+            // ── Flatpak variants ──
             // Flatpak Chrome
             var_app
                 .join("com.google.Chrome")
@@ -421,6 +437,14 @@ mod inner {
                 .join("config")
                 .join("microsoft-edge")
                 .join("NativeMessagingHosts"),
+            // Flatpak Brave
+            var_app
+                .join("com.brave.Browser")
+                .join("config")
+                .join("BraveSoftware")
+                .join("Brave-Browser")
+                .join("NativeMessagingHosts"),
+            // ── Snap variants ──
             // Snap Chromium
             snap.join("chromium")
                 .join("common")
@@ -430,23 +454,31 @@ mod inner {
         ]
     }
 
-    /// All Firefox NMH manifest directories on Linux.
+    /// All Firefox-family NMH manifest directories on Linux.
     ///
-    /// Returns multiple paths: the standard location and the Flatpak sandboxed
-    /// location.  Registration writes to all paths; needs_update checks that
-    /// the standard path is up-to-date (Flatpak path is optional).
+    /// Returns multiple paths: standard location, Flatpak sandboxed variants,
+    /// and Firefox-fork browsers (LibreWolf, Waterfox).
+    /// Registration writes to all paths; needs_update checks that the standard
+    /// path is up-to-date (other paths are optional).
     fn firefox_nmh_dirs() -> Vec<PathBuf> {
         let Some(home) = home_dir() else {
             return vec![];
         };
+        let var_app = home.join(".var").join("app");
         vec![
-            // Standard
+            // Standard Firefox
             home.join(".mozilla").join("native-messaging-hosts"),
             // Flatpak Firefox
-            home.join(".var")
-                .join("app")
+            var_app
                 .join("org.mozilla.firefox")
                 .join(".mozilla")
+                .join("native-messaging-hosts"),
+            // LibreWolf (privacy-focused Firefox fork, verified via official FAQ)
+            home.join(".librewolf").join("native-messaging-hosts"),
+            // Flatpak LibreWolf
+            var_app
+                .join("io.gitlab.librewolf-community")
+                .join(".librewolf")
                 .join("native-messaging-hosts"),
         ]
     }
@@ -764,6 +796,7 @@ mod inner {
         };
         let lib = home.join("Library").join("Application Support");
         vec![
+            // Google Chrome (stable / beta / canary)
             lib.join("Google")
                 .join("Chrome")
                 .join("NativeMessagingHosts"),
@@ -773,12 +806,21 @@ mod inner {
             lib.join("Google")
                 .join("Chrome Canary")
                 .join("NativeMessagingHosts"),
+            // Open-source Chromium
             lib.join("Chromium").join("NativeMessagingHosts"),
+            // Microsoft Edge (stable / beta)
             lib.join("Microsoft Edge").join("NativeMessagingHosts"),
             lib.join("Microsoft Edge Beta").join("NativeMessagingHosts"),
+            // Arc
             lib.join("Arc")
                 .join("User Data")
                 .join("NativeMessagingHosts"),
+            // Brave Browser (verified via KeePassXC source)
+            lib.join("BraveSoftware")
+                .join("Brave-Browser")
+                .join("NativeMessagingHosts"),
+            // Vivaldi (verified via KeePassXC source)
+            lib.join("Vivaldi").join("NativeMessagingHosts"),
         ]
     }
 

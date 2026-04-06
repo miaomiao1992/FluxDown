@@ -31,6 +31,13 @@ pub struct CreateTask {
     /// Empty = skip verification.
     #[serde(default)]
     pub checksum: String,
+    /// Pre-selected file indices for BT downloads (from the new-download dialog).
+    /// When non-empty, Phase 3.5 will use these instead of waiting for a
+    /// second file-selection dialog.
+    /// Special value [-1] = user cancelled = task should abort immediately.
+    /// Empty = no pre-selection (show the dialog after metadata resolves).
+    #[serde(default)]
+    pub selected_file_indices: Vec<i32>,
 }
 
 /// Single entry in a batch download (URL + optional filename + optional checksum)
@@ -520,4 +527,67 @@ pub struct QueueInfo {
     /// Default user-agent for tasks in this queue. Empty = inherit global UA.
     #[serde(default)]
     pub default_user_agent: String,
+}
+
+// ========== BT file selection signals ==========
+
+/// BT torrent metadata resolved — send file list to Dart for user selection (Rust → Dart).
+/// Dart should display a file selection dialog and respond with [SelectBtFiles].
+#[derive(Serialize, RustSignal)]
+pub struct BtFilesInfo {
+    pub task_id: String,
+    /// Total size of all files in the torrent (bytes).
+    pub total_bytes: i64,
+    /// List of files in the torrent.
+    pub files: Vec<BtFileEntry>,
+}
+
+/// A single file entry in a BT torrent.
+#[derive(Serialize, Deserialize, SignalPiece)]
+pub struct BtFileEntry {
+    /// Zero-based file index within the torrent.
+    pub index: i32,
+    /// Relative path of the file inside the torrent (e.g. "folder/sub/file.mp4").
+    pub path: String,
+    /// File size in bytes.
+    pub size: i64,
+}
+
+/// User selected which BT files to download (Dart → Rust).
+#[derive(Deserialize, DartSignal)]
+pub struct SelectBtFiles {
+    pub task_id: String,
+    /// Indices of files the user wants to download (from [BtFileEntry.index]).
+    /// Empty = download all files (should not happen in practice).
+    pub selected_indices: Vec<i32>,
+}
+
+// ========== Torrent meta probe (for new-download dialog preview) ==========
+
+/// Dart requests a preview of .torrent file contents before creating the task.
+/// Rust will parse the torrent bytes locally (no network needed) and reply
+/// immediately with [TorrentMetaResult].
+#[derive(Deserialize, DartSignal)]
+pub struct ProbeTorrentMeta {
+    /// Unique probe ID chosen by Dart (e.g. a UUID or timestamp string).
+    /// Echoed back in [TorrentMetaResult] so Dart can match the response.
+    pub probe_id: String,
+    /// Raw bytes of the .torrent file.
+    pub torrent_bytes: Vec<u8>,
+}
+
+/// Rust replies to [ProbeTorrentMeta] with the parsed file list (Rust → Dart).
+/// On parse error, `files` is empty and `error` is non-empty.
+#[derive(Serialize, RustSignal)]
+pub struct TorrentMetaResult {
+    /// Echoed from [ProbeTorrentMeta.probe_id].
+    pub probe_id: String,
+    /// Display name of the torrent (the top-level name field).
+    pub name: String,
+    /// Total size of all files in the torrent (bytes).
+    pub total_bytes: i64,
+    /// Parsed file list. Empty on error.
+    pub files: Vec<BtFileEntry>,
+    /// Non-empty when parsing failed.
+    pub error: String,
 }

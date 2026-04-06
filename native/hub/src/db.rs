@@ -102,6 +102,11 @@ impl Db {
             "ALTER TABLE queues ADD COLUMN default_user_agent TEXT NOT NULL DEFAULT '';",
         );
 
+        // Phase 7: BT selected file indices (comma-separated, empty = all files)
+        let _ = conn.execute_batch(
+            "ALTER TABLE tasks ADD COLUMN bt_selected_files TEXT NOT NULL DEFAULT '';",
+        );
+
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -525,6 +530,77 @@ impl Db {
                 params![task_id, file_bytes],
             )?;
             Ok(())
+        })
+        .await?
+    }
+
+    /// Persist the user's BT file selection so it survives app restart.
+    ///
+    /// DB encoding:
+    ///   `""`        — never confirmed (default, will show dialog on next resume)
+    ///   `"all"`     — user confirmed all files (skip dialog, no update_only_files)
+    ///   `"0,2,5"`   — user selected a subset (skip dialog, apply update_only_files)
+    pub async fn save_bt_selected_files(
+        &self,
+        task_id: &str,
+        indices: &[i32],
+        is_all: bool,
+    ) -> Result<(), DbError> {
+        let conn = self.conn.clone();
+        let task_id = task_id.to_owned();
+        let value = if is_all {
+            "all".to_owned()
+        } else {
+            indices
+                .iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().map_err(|_| DbError::LockPoisoned)?;
+            conn.execute(
+                "UPDATE tasks SET bt_selected_files = ?1 WHERE id = ?2",
+                params![value, task_id],
+            )?;
+            Ok(())
+        })
+        .await?
+    }
+
+    /// Load the persisted BT file selection for a task.
+    ///
+    /// Returns:
+    ///   `None`           — never confirmed; caller should show the dialog.
+    ///   `Some([])`       — user confirmed all files; skip dialog & update_only_files.
+    ///   `Some([0,2,5])`  — user selected a subset; skip dialog, apply update_only_files.
+    pub async fn load_bt_selected_files(&self, task_id: &str) -> Result<Option<Vec<i32>>, DbError> {
+        let conn = self.conn.clone();
+        let task_id = task_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().map_err(|_| DbError::LockPoisoned)?;
+            let value: String = match conn.query_row(
+                "SELECT bt_selected_files FROM tasks WHERE id = ?1",
+                params![task_id],
+                |row| row.get(0),
+            ) {
+                Ok(v) => v,
+                Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+                Err(e) => return Err(DbError::Sqlite(e)),
+            };
+            if value.is_empty() {
+                // Never confirmed — show the dialog.
+                return Ok(None);
+            }
+            if value == "all" {
+                // Confirmed: download all files.
+                return Ok(Some(Vec::new()));
+            }
+            let indices = value
+                .split(',')
+                .filter_map(|s| s.trim().parse::<i32>().ok())
+                .collect();
+            Ok(Some(indices))
         })
         .await?
     }

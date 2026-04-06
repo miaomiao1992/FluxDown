@@ -307,6 +307,40 @@ class S {
       _t('已导入 $count 个链接', 'Imported $count URLs');
 
   // ─────────────────────────────────────────────
+  // BT File Selection Dialog
+  // ─────────────────────────────────────────────
+
+  String get btFileSelectTitle => _t('选择要下载的文件', 'Select Files to Download');
+  String get btFileSelectDescSingle => _t(
+    '该种子包含 1 个文件，确认后开始下载。',
+    'This torrent contains 1 file. Confirm to start downloading.',
+  );
+  String btFileSelectDesc(int count) => _t(
+    '该种子包含 $count 个文件，请选择要下载的文件。',
+    'This torrent contains $count files. Select which files to download.',
+  );
+  String get btFileSelectAll => _t('全部文件', 'All Files');
+  String btFileSelectConfirm(int count, String size) => _t(
+    '下载 $count 个文件（$size）',
+    'Download $count file(s) ($size)',
+  );
+  String get btResolvingMagnet =>
+      _t('正在解析磁力链接，请稍候...', 'Resolving magnet link, please wait...');
+  String get btWaitingFiles => _t(
+    '请选择要下载的文件',
+    'Select files to download',
+  );
+  String get btProbing => _t('正在解析种子文件...', 'Parsing torrent file...');
+  String get btProbeError => _t(
+    '种子文件解析失败，将在下载开始后重新解析',
+    'Failed to parse torrent file; will retry after download starts',
+  );
+  String btStartWithSelection(int count, String size) => _t(
+    '下载 $count 个文件（$size）',
+    'Download $count file(s) ($size)',
+  );
+
+  // ─────────────────────────────────────────────
   // StatusBar
   // ─────────────────────────────────────────────
 

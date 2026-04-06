@@ -495,10 +495,11 @@ class DownloadController extends ChangeNotifier {
     String userAgent = '',
     String queueId = '',
     String checksum = '',
+    List<int> selectedFileIndices = const [],
   }) {
     logInfo(
       _tag,
-      'createTask: url=$url, dir=$saveDir, file=$fileName, seg=$segments, cookies_len=${cookies.length}, torrent_bytes=${torrentFileBytes?.length ?? 0}, queue=$queueId',
+      'createTask: url=$url, dir=$saveDir, file=$fileName, seg=$segments, cookies_len=${cookies.length}, torrent_bytes=${torrentFileBytes?.length ?? 0}, queue=$queueId, selected_files=${selectedFileIndices.length}',
     );
     CreateTask(
       url: url,
@@ -511,12 +512,47 @@ class DownloadController extends ChangeNotifier {
       userAgent: userAgent,
       queueId: queueId,
       checksum: checksum,
+      selectedFileIndices: selectedFileIndices,
     ).sendSignalToRust();
     // 分析埋点
     final protocol = (torrentFileBytes != null && torrentFileBytes.isNotEmpty)
         ? 'bt'
         : _inferProtocol(url);
     AnalyticsService.instance.trackDownloadCreated(protocol);
+  }
+
+  /// Create a BT download task from already-read torrent bytes, with optional
+  /// pre-selected file indices (from the new-download dialog file picker).
+  ///
+  /// When [selectedFileIndices] is non-empty, Rust skips the file-selection
+  /// dialog and downloads only the specified files.
+  void createTaskFromTorrentBytes({
+    required Uint8List torrentBytes,
+    required String torrentName,
+    required String saveDir,
+    String proxyUrl = '',
+    String userAgent = '',
+    String queueId = '',
+    List<int> selectedFileIndices = const [],
+  }) {
+    logInfo(
+      _tag,
+      'createTaskFromTorrentBytes: name=$torrentName, dir=$saveDir, selected=${selectedFileIndices.length}',
+    );
+    CreateTask(
+      url: '',
+      saveDir: saveDir,
+      fileName: torrentName,
+      segments: 0,
+      cookies: '',
+      torrentFileBytes: torrentBytes,
+      proxyUrl: proxyUrl,
+      userAgent: userAgent,
+      queueId: queueId,
+      checksum: '',
+      selectedFileIndices: selectedFileIndices,
+    ).sendSignalToRust();
+    AnalyticsService.instance.trackDownloadCreated('bt');
   }
 
   /// Create a download task from a .torrent file on disk.
@@ -537,10 +573,17 @@ class DownloadController extends ChangeNotifier {
   /// This is a static helper so it can be called both from a
   /// [DownloadController] instance and from [main.dart] (which has no
   /// controller instance at startup).
+  ///
+  /// When [selectedFileIndices] is non-empty, Rust skips the file-selection
+  /// dialog and downloads only the specified files.
   static Future<void> sendTorrentFileSignal(
     String torrentFilePath,
     String saveDir, {
     String proxyUrl = '',
+    String userAgent = '',
+    String queueId = '',
+    List<int> selectedFileIndices = const [],
+    String torrentName = '',
   }) async {
     try {
       final file = File(torrentFilePath);
@@ -549,11 +592,15 @@ class DownloadController extends ChangeNotifier {
         logInfo(_tag, 'torrent file is empty: $torrentFilePath');
         return;
       }
-      // Use the .torrent file name (without extension) as the initial display name.
-      final baseName = file.uri.pathSegments.last;
-      final displayName = baseName.endsWith('.torrent')
-          ? baseName.substring(0, baseName.length - 8)
-          : baseName;
+      // Use the provided name, or derive from file name (without extension).
+      final displayName = torrentName.isNotEmpty
+          ? torrentName
+          : () {
+              final baseName = file.uri.pathSegments.last;
+              return baseName.endsWith('.torrent')
+                  ? baseName.substring(0, baseName.length - 8)
+                  : baseName;
+            }();
 
       CreateTask(
         url: '',
@@ -563,9 +610,10 @@ class DownloadController extends ChangeNotifier {
         cookies: '',
         torrentFileBytes: bytes,
         proxyUrl: proxyUrl,
-        userAgent: '',
-        queueId: '',
+        userAgent: userAgent,
+        queueId: queueId,
         checksum: '',
+        selectedFileIndices: selectedFileIndices,
       ).sendSignalToRust();
       AnalyticsService.instance.trackDownloadCreated('bt');
     } catch (e) {
@@ -1111,9 +1159,32 @@ class DownloadController extends ChangeNotifier {
     if (_deletedTaskIds.contains(p.taskId)) return;
     final idx = _tasks.indexWhere((t) => t.id == p.taskId);
     if (idx < 0) return;
-    _tasks[idx] = _tasks[idx].copyWith(
-      fileName: p.fileName.isNotEmpty ? p.fileName : null,
+
+    final task = _tasks[idx];
+
+    // Guard: if the task already has a confirmed file name (set by the user
+    // in the dialog or resolved by the download engine via TaskProgress),
+    // do NOT let the background meta-probe overwrite it.
+    //
+    // This prevents the race where:
+    //   1. User sets a custom name → TaskProgress confirms it (fileNameConfirmed=true)
+    //   2. pending-queue probe finishes → sends TaskMetaProbed with server name
+    //   3. Without this guard the UI name would flip to the server name while
+    //      the actual file on disk uses the user's name → mismatch.
+    //
+    // Rust already guards the DB side (update_task_file_name only writes when
+    // file_name is empty), and all probe paths (HTTP/FTP/magnet) return an
+    // empty name when file_name is non-empty — so p.fileName should already
+    // be empty here whenever fileNameConfirmed is true.  This is a second
+    // line of defence in case a future code path forgets that contract.
+    final acceptFileName = p.fileName.isNotEmpty && !task.fileNameConfirmed;
+
+    _tasks[idx] = task.copyWith(
+      fileName: acceptFileName ? p.fileName : null,
       totalBytes: p.totalBytes > 0 ? p.totalBytes : null,
+      // If we accepted a probe-supplied name, mark it confirmed so a second
+      // probe signal (unlikely but possible) doesn't keep flipping the name.
+      fileNameConfirmed: acceptFileName ? true : null,
     );
     _safeNotifyListeners();
   }

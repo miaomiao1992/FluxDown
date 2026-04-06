@@ -1,9 +1,11 @@
+import 'dart:async';
 import 'dart:io';
 
 import '../services/file_picker_service.dart';
 import 'package:flutter/material.dart'
     show
         AdaptiveTextSelectionToolbar,
+        CircularProgressIndicator,
         Colors,
         DefaultMaterialLocalizations,
         InputDecoration,
@@ -15,6 +17,7 @@ import 'package:flutter/material.dart'
         TextSelectionThemeData;
 import 'package:flutter/widgets.dart';
 import 'package:flutter/services.dart';
+import 'package:rinf/rinf.dart';
 import 'package:shadcn_ui/shadcn_ui.dart';
 import '../bindings/bindings.dart';
 import '../i18n/locale_provider.dart';
@@ -22,6 +25,9 @@ import '../models/download_controller.dart';
 import '../models/download_queue.dart';
 import '../models/settings_provider.dart';
 import '../theme/app_colors.dart';
+import '../services/bt_file_selection_service.dart';
+
+import 'bt_file_list_widget.dart';
 import 'dir_picker_field.dart';
 import 'thread_selector.dart';
 
@@ -84,11 +90,52 @@ class _NewDownloadDialogContentState extends State<_NewDownloadDialogContent> {
   /// 是否所有链接都是 magnet
   bool _allMagnet = false;
 
-  /// 已选择的 .torrent 文件路径列表
+  /// 已选择的 .torrent 文件路径列表（单次只支持一个，批量 torrent 通过多次添加实现）
   final List<String> _torrentFilePaths = [];
 
   /// 防止重复打开文件选择器
   bool _isPicking = false;
+
+  // ── torrent 文件预解析状态 ──────────────────────────────────────────────────
+
+  /// 当前正在解析的 probe_id → torrent 路径映射（一次只解析一个）
+  String? _probingPath;
+
+  /// 解析结果：路径 → TorrentMetaResult
+  final Map<String, TorrentMetaResult> _torrentMeta = {};
+
+  /// 解析进行中（显示 loading）
+  bool _isProbing = false;
+
+  /// 解析错误消息（非空时显示）
+  String _probeError = '';
+
+  /// 每个 torrent 文件的文件勾选状态：路径 → 已选 index 集合
+  final Map<String, Set<int>> _torrentSelections = {};
+
+  /// TorrentMetaResult 信号订阅
+  StreamSubscription<RustSignalPack<TorrentMetaResult>>? _metaSub;
+
+  // ── 磁力链接等待文件列表状态机 ─────────────────────────────────────────────
+  // 状态：null = 普通模式；'probing' = 已创建任务正在等待 DHT 解析；
+  //        'selecting' = 文件列表已到达，等待用户选择
+  String? _btWaitPhase; // null | 'probing' | 'selecting'
+
+  /// 收到 BtFilesInfo 后记录的真实 task_id（用于发送 SelectBtFiles）
+  String? _btPendingTaskId;
+
+  /// 收到的 BT 文件列表（Phase=selecting 时非空）
+  List<BtFileEntry> _btFiles = [];
+
+  /// 用户在对话框内对 BT 文件的勾选状态
+  Set<int> _btSelectedIndices = {};
+
+  /// 用户在 probing 阶段（task_id 尚未知）点了取消，或对话框被关闭。
+  /// 下次收到 BtFilesInfo 时立刻发 [-1] 让 Rust 暂停任务。
+  bool _btCancelPending = false;
+
+
+
 
   /// 根据队列 ID 计算有效的线程数选项字符串。
   ///
@@ -117,6 +164,53 @@ class _NewDownloadDialogContentState extends State<_NewDownloadDialogContent> {
     _selectedQueueId = qf ?? widget.settingsProvider.defaultQueueId;
     // 根据队列/全局设置初始化默认线程数
     selectedThreads = _effectiveSegmentsOption(_selectedQueueId);
+    // 订阅 torrent meta 解析结果（.torrent 文件预解析）
+    _metaSub = TorrentMetaResult.rustSignalStream.listen(_onTorrentMetaResult);
+  }
+
+  /// 由 [BtFileSelectionService] 回调：DHT 解析完成，文件列表已就绪。
+  void _onBtFilesInfoReceived(BtFilesInfo msg) {
+    // 用户已取消（probing 阶段点取消、或对话框被关闭）：
+    // 立刻发 [-1] 让 Rust 将任务暂停，不展示文件列表。
+    if (_btCancelPending || !mounted || _btWaitPhase != 'probing') {
+      SelectBtFiles(
+        taskId: msg.taskId,
+        selectedIndices: const [-1],
+      ).sendSignalToRust();
+      return;
+    }
+    setState(() {
+      _btPendingTaskId = msg.taskId;
+      _btWaitPhase = 'selecting';
+      _btFiles = msg.files;
+      _btSelectedIndices = msg.files.map((f) => f.index.toInt()).toSet();
+    });
+  }
+
+
+
+  void _onTorrentMetaResult(RustSignalPack<TorrentMetaResult> pack) {
+    final msg = pack.message;
+    // probeId 就是文件路径（_probeTorrentFile 里以 path 作为 probeId）
+    final path = msg.probeId;
+    // 只处理本对话框发出的 probe（路径必须在当前列表中）
+    if (!_torrentFilePaths.contains(path)) return;
+    if (!mounted) return;
+    setState(() {
+      if (_probingPath == path) {
+        _isProbing = false;
+        _probingPath = null;
+      }
+      if (msg.error.isNotEmpty) {
+        _probeError = msg.error;
+      } else {
+        _probeError = '';
+        _torrentMeta[path] = msg;
+        // 默认全选
+        _torrentSelections[path] =
+            msg.files.map((f) => f.index.toInt()).toSet();
+      }
+    });
   }
 
   void _onUrlChanged() {
@@ -239,6 +333,23 @@ class _NewDownloadDialogContentState extends State<_NewDownloadDialogContent> {
 
   @override
   void dispose() {
+    // selecting 阶段：已拿到 task_id，直接发 [-1] 让 Rust 暂停任务
+    if (_btWaitPhase == 'selecting' && _btPendingTaskId != null) {
+      SelectBtFiles(
+        taskId: _btPendingTaskId!,
+        selectedIndices: const [-1],
+      ).sendSignalToRust();
+      BtFileSelectionService.registerPendingHandler(null);
+    } else if (_btWaitPhase == 'probing') {
+      // probing 阶段：task_id 尚未知，标记取消，让回调在收到信号时发 [-1]
+      // _onBtFilesInfoReceived 检查 _btCancelPending，即使 mounted=false 也能拦截
+      _btCancelPending = true;
+      // 不清除 Service 回调——让信号路由过来，回调发 [-1] 后 Rust 暂停任务
+    } else {
+      // 普通关闭，清除任何残留的 Service 回调
+      BtFileSelectionService.registerPendingHandler(null);
+    }
+    _metaSub?.cancel();
     _urlController.removeListener(_onUrlChanged);
     _urlController.dispose();
     _urlFocusNode.dispose();
@@ -266,6 +377,11 @@ class _NewDownloadDialogContentState extends State<_NewDownloadDialogContent> {
             }
           }
         });
+        // 自动解析最后一个新添加的 torrent 文件
+        final newPath = _torrentFilePaths.last;
+        if (!_torrentMeta.containsKey(newPath)) {
+          await _probeTorrentFile(newPath);
+        }
       }
     } on FilePickerException catch (e) {
       if (mounted) _showPickerError(e);
@@ -274,9 +390,41 @@ class _NewDownloadDialogContentState extends State<_NewDownloadDialogContent> {
     }
   }
 
+  /// 发送 ProbeTorrentMeta 信号，触发 Rust 本地解析 .torrent 文件内容
+  Future<void> _probeTorrentFile(String path) async {
+    if (!mounted) return;
+    try {
+      final bytes = await File(path).readAsBytes();
+      if (!mounted) return;
+      setState(() {
+        _isProbing = true;
+        _probeError = '';
+        _probingPath = path;
+      });
+      ProbeTorrentMeta(
+        probeId: path,
+        torrentBytes: bytes,
+      ).sendSignalToRust();
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _isProbing = false;
+          _probeError = e.toString();
+        });
+      }
+    }
+  }
+
   void _removeTorrentFile(int index) {
+    final path = _torrentFilePaths[index];
     setState(() {
       _torrentFilePaths.removeAt(index);
+      _torrentMeta.remove(path);
+      _torrentSelections.remove(path);
+      if (_probingPath == path) {
+        _probingPath = null;
+        _isProbing = false;
+      }
     });
   }
 
@@ -363,7 +511,196 @@ class _NewDownloadDialogContentState extends State<_NewDownloadDialogContent> {
   bool get _isBatch => _urlCount > 1;
   bool get _hasTorrentFiles => _torrentFilePaths.isNotEmpty;
 
-  void _startDownload() {
+  /// Build the UI block for a single .torrent entry at index [ti].
+  Widget _buildTorrentFileEntry(int ti, AppColors c, S s) {
+    final path = _torrentFilePaths[ti];
+    final fileName = File(path).uri.pathSegments.last;
+    final meta = _torrentMeta[path];
+    final selection = _torrentSelections[path];
+    final isCurrentlyProbing = _isProbing && _probingPath == path;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // ── Header row: name + size + remove ──────────────────────────────
+        Row(
+          children: [
+            Icon(LucideIcons.fileDown, size: 13, color: c.accent),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                meta != null ? meta.name : fileName,
+                style: TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w500,
+                  color: c.textPrimary,
+                ),
+                overflow: TextOverflow.ellipsis,
+                maxLines: 1,
+              ),
+            ),
+            if (meta != null) ...[
+              Text(
+                formatBtFileSize(meta.totalBytes.toInt()),
+                style: TextStyle(fontSize: 11, color: c.textMuted),
+              ),
+              const SizedBox(width: 8),
+            ],
+            GestureDetector(
+              onTap: () => _removeTorrentFile(ti),
+              child: Icon(LucideIcons.x, size: 14, color: c.textMuted),
+            ),
+          ],
+        ),
+        const SizedBox(height: 6),
+        // ── Loading indicator ──────────────────────────────────────────────
+        if (isCurrentlyProbing)
+          Container(
+            padding: const EdgeInsets.symmetric(vertical: 20),
+            alignment: Alignment.center,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                SizedBox(
+                  width: 14,
+                  height: 14,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: c.accent,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  s.btProbing,
+                  style: TextStyle(fontSize: 12, color: c.textMuted),
+                ),
+              ],
+            ),
+          )
+        // ── Parse error ────────────────────────────────────────────────────
+        else if (_probeError.isNotEmpty && meta == null)
+          Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: c.statusError.withValues(alpha: 0.08),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(
+                color: c.statusError.withValues(alpha: 0.3),
+              ),
+            ),
+            child: Row(
+              children: [
+                Icon(LucideIcons.circleAlert, size: 13, color: c.statusError),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    s.btProbeError,
+                    style: TextStyle(fontSize: 12, color: c.statusError),
+                  ),
+                ),
+              ],
+            ),
+          )
+        // ── File list (parsed successfully) ───────────────────────────────
+        else if (meta != null && selection != null)
+          BtFileListWidget(
+            files: meta.files,
+            selectedIndices: selection,
+            onToggleAll: () {
+              setState(() {
+                if (selection.length == meta.files.length) {
+                  _torrentSelections[path] = {};
+                } else {
+                  _torrentSelections[path] =
+                      meta.files.map((f) => f.index.toInt()).toSet();
+                }
+              });
+            },
+            onToggleFile: (idx) {
+              setState(() {
+                final current = _torrentSelections[path] ?? {};
+                if (current.contains(idx)) {
+                  _torrentSelections[path] = Set.from(current)..remove(idx);
+                } else {
+                  _torrentSelections[path] = Set.from(current)..add(idx);
+                }
+              });
+            },
+            maxHeight: 260,
+          ),
+        if (ti < _torrentFilePaths.length - 1) const SizedBox(height: 14),
+      ],
+    );
+  }
+
+  /// 构建下载按钮的标签文字。
+  ///
+  /// - torrent 已全部解析完成：显示「下载 N 个文件（X MB）」
+  /// - torrent 解析中：显示「解析中...」
+  /// - torrent 未解析（如解析失败）：显示「开始下载 N 个」
+  /// - 普通 URL 批量：显示「下载 N 个文件」
+  /// - 普通 URL 单条：显示「开始下载」
+  /// 计算 BT 等待阶段用户已选文件的总大小
+  int get _btSelectedTotalBytes {
+    int total = 0;
+    for (final f in _btFiles) {
+      if (_btSelectedIndices.contains(f.index.toInt())) {
+        total += f.size.toInt();
+      }
+    }
+    return total;
+  }
+
+  String _buildStartButtonLabel(S s) {
+    if (_hasTorrentFiles) {
+      if (_isProbing) return s.btProbing;
+      // 统计所有已解析 torrent 中用户选中的文件总数和总大小
+      int totalSelected = 0;
+      int totalBytes = 0;
+      bool allProbed = true;
+      for (final path in _torrentFilePaths) {
+        final meta = _torrentMeta[path];
+        final sel = _torrentSelections[path];
+        if (meta == null) {
+          allProbed = false;
+          continue;
+        }
+        if (sel != null) {
+          totalSelected += sel.length;
+          for (final f in meta.files) {
+            if (sel.contains(f.index.toInt())) {
+              totalBytes += f.size.toInt();
+            }
+          }
+        }
+      }
+      if (allProbed && totalSelected > 0) {
+        return s.btStartWithSelection(
+          totalSelected,
+          formatBtFileSize(totalBytes),
+        );
+      }
+      return s.startBatchDownload(_torrentFilePaths.length);
+    }
+    if (_isBatch) return s.startBatchDownload(_urlCount);
+    return s.startDownload;
+  }
+
+  /// 当前所有 torrent 文件是否都已解析完成（或解析失败）
+  bool get _allTorrentsProbed =>
+      !_isProbing &&
+      _torrentFilePaths.every(
+        (p) => _torrentMeta.containsKey(p) || _probeError.isNotEmpty,
+      );
+
+  /// 用户是否已从所有 torrent 中选择了至少一个文件
+  bool get _hasAnyTorrentSelection =>
+      _torrentFilePaths.any((p) {
+        final sel = _torrentSelections[p];
+        return sel != null && sel.isNotEmpty;
+      });
+
+  Future<void> _startDownload() async {
     final saveDir = _saveDirController.text.trim();
     if (saveDir.isEmpty) return;
 
@@ -373,13 +710,33 @@ class _NewDownloadDialogContentState extends State<_NewDownloadDialogContent> {
     // Handle .torrent file downloads
     if (_hasTorrentFiles) {
       for (final path in _torrentFilePaths) {
-        widget.controller.createTaskFromTorrentFile(
-          torrentFilePath: path,
-          saveDir: saveDir,
-          proxyUrl: proxyUrl,
-        );
+        final meta = _torrentMeta[path];
+        final selection = _torrentSelections[path];
+        if (meta != null && selection != null) {
+          // Already probed: send torrent bytes with pre-selected file indices
+          // so Rust skips the second file-selection dialog entirely.
+          final selectedIndices = selection.toList()..sort();
+          await DownloadController.sendTorrentFileSignal(
+            path,
+            saveDir,
+            proxyUrl: proxyUrl,
+            userAgent: userAgent,
+            queueId: _selectedQueueId,
+            selectedFileIndices: selectedIndices,
+            torrentName: meta.name,
+          );
+        } else {
+          // Probe not yet complete (e.g. user clicked too fast, or parse
+          // failed): fall back to the legacy path; Rust will show the
+          // file-selection dialog after metadata resolves.
+          await widget.controller.createTaskFromTorrentFile(
+            torrentFilePath: path,
+            saveDir: saveDir,
+            proxyUrl: proxyUrl,
+          );
+        }
       }
-      Navigator.of(context).pop();
+      if (mounted) Navigator.of(context).pop();
       return;
     }
 
@@ -389,8 +746,31 @@ class _NewDownloadDialogContentState extends State<_NewDownloadDialogContent> {
     final parsed = int.tryParse(selectedThreads ?? '') ?? 0;
     final segments = parsed > 0 ? parsed.clamp(1, 64) : 0;
 
+    // 单条磁力链接：对话框保持打开，转入 loading 阶段等待文件列表
+    if (entries.length == 1 &&
+        entries.first.url.toLowerCase().startsWith('magnet:')) {
+      final entry = entries.first;
+      // 先注册回调，再发 CreateTask 信号，保证信号到达时回调已就位（无竞态）
+      BtFileSelectionService.registerPendingHandler(_onBtFilesInfoReceived);
+      widget.controller.createTask(
+        url: entry.url,
+        saveDir: saveDir,
+        fileName: entry.fileName,
+        segments: segments,
+        proxyUrl: proxyUrl,
+        userAgent: userAgent,
+        queueId: _selectedQueueId,
+        checksum: entry.checksum,
+      );
+      setState(() {
+        _btWaitPhase = 'probing';
+        _btPendingTaskId = null;
+      });
+      return;
+    }
+
     if (entries.length == 1) {
-      // 单条 — 使用 CreateTask，支持重命名
+      // 单条非磁力 — 使用 CreateTask，支持重命名
       final entry = entries.first;
       // 重命名字段优先；其次使用 out= 中的文件名
       final rename = _renameController.text.trim();
@@ -425,7 +805,45 @@ class _NewDownloadDialogContentState extends State<_NewDownloadDialogContent> {
       );
     }
 
-    Navigator.of(context).pop();
+    if (mounted) Navigator.of(context).pop();
+  }
+
+  /// 用户在对话框内确认了 BT 文件选择（磁力链接等待阶段）
+  void _onBtSelectionConfirmed() {
+    if (_btPendingTaskId == null) return;
+    if (_btSelectedIndices.isEmpty) return;
+    final indices = _btSelectedIndices.toList()..sort();
+    final tid = _btPendingTaskId!;
+    SelectBtFiles(
+      taskId: tid,
+      selectedIndices: indices,
+    ).sendSignalToRust();
+    // 清理状态，防止 dispose 再次发送 [-1]
+    _btPendingTaskId = null;
+    _btWaitPhase = null;
+    if (mounted) Navigator.of(context).pop();
+  }
+
+  /// 用户取消了 BT 文件选择（磁力链接等待阶段）
+  void _onBtSelectionCancelled() {
+    final tid = _btPendingTaskId;
+    if (tid != null) {
+      // selecting 阶段：已拿到 task_id，直接发 [-1] 让 Rust 暂停任务
+      SelectBtFiles(
+        taskId: tid,
+        selectedIndices: const [-1],
+      ).sendSignalToRust();
+      BtFileSelectionService.registerPendingHandler(null);
+      _btPendingTaskId = null;
+      _btWaitPhase = null;
+    } else {
+      // probing 阶段：task_id 尚未知，标记取消
+      // 当 BtFilesInfo 信号到达时，_onBtFilesInfoReceived 检查
+      // _btCancelPending 并立刻发 [-1] 暂停任务
+      _btCancelPending = true;
+      _btWaitPhase = null; // 退出等待状态，UI 恢复正常
+    }
+    if (mounted) Navigator.of(context).pop();
   }
 
   @override
@@ -449,100 +867,61 @@ class _NewDownloadDialogContentState extends State<_NewDownloadDialogContent> {
           Text(s.newDownload),
         ],
       ),
-      description: Text(s.batchDownloadDesc),
-      actions: [
-        ShadButton.outline(
-          onPressed: () => Navigator.of(context).pop(),
-          child: Text(s.cancel),
-        ),
-        ShadButton(
-          onPressed: _startDownload,
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(LucideIcons.download, size: 13, color: Colors.white),
-              const SizedBox(width: 6),
-              Text(
-                _hasTorrentFiles
-                    ? s.startBatchDownload(_torrentFilePaths.length)
-                    : _isBatch
-                    ? s.startBatchDownload(_urlCount)
-                    : s.startDownload,
-                style: const TextStyle(color: Colors.white),
+      description: Text(
+        _btWaitPhase != null ? s.btWaitingFiles : s.batchDownloadDesc,
+      ),
+      actions: _btWaitPhase != null
+          ? _buildBtWaitActions(s, c)
+          : [
+              ShadButton.outline(
+                onPressed: () => Navigator.of(context).pop(),
+                child: Text(s.cancel),
+              ),
+              ShadButton(
+                onPressed:
+                    (_isProbing ||
+                            (_hasTorrentFiles &&
+                                !_hasAnyTorrentSelection &&
+                                _allTorrentsProbed))
+                        ? null
+                        : () => _startDownload(),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(
+                      LucideIcons.download,
+                      size: 13,
+                      color: Colors.white,
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      _buildStartButtonLabel(s),
+                      style: const TextStyle(color: Colors.white),
+                    ),
+                  ],
+                ),
               ),
             ],
-          ),
-        ),
-      ],
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 16),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // .torrent 文件选择区域（当有 torrent 文件时替换 URL 输入区）
-            if (_hasTorrentFiles) ...[
-              Row(
-                children: [
-                  _SectionLabel(text: s.torrentFileSelected, c: c),
-                  const Spacer(),
-                  Text(
-                    s.torrentFileCount(_torrentFilePaths.length),
-                    style: TextStyle(fontSize: 11, color: c.textMuted),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 6),
-              Container(
-                constraints: const BoxConstraints(maxHeight: 120),
-                decoration: BoxDecoration(
-                  color: c.surface1,
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: c.border),
-                ),
-                child: ListView.builder(
-                  shrinkWrap: true,
-                  padding: const EdgeInsets.all(6),
-                  itemCount: _torrentFilePaths.length,
-                  itemBuilder: (context, index) {
-                    final path = _torrentFilePaths[index];
-                    final fileName = File(path).uri.pathSegments.last;
-                    return Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 2),
-                      child: Row(
-                        children: [
-                          Icon(LucideIcons.fileDown, size: 14, color: c.accent),
-                          const SizedBox(width: 6),
-                          Expanded(
-                            child: Text(
-                              fileName,
-                              style: TextStyle(
-                                fontSize: 12.5,
-                                color: c.textPrimary,
-                              ),
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                          GestureDetector(
-                            onTap: () => _removeTorrentFile(index),
-                            child: Icon(
-                              LucideIcons.x,
-                              size: 14,
-                              color: c.textMuted,
-                            ),
-                          ),
-                        ],
-                      ),
-                    );
-                  },
-                ),
-              ),
+            // ── BT 等待文件列表阶段 ──────────────────────────────────────────
+            if (_btWaitPhase != null) ...[
+              _buildBtWaitBody(s, c),
+            ] else if (_hasTorrentFiles) ...[
+              // ── Per-torrent header + file list ────────────────────────────
+              for (int ti = 0; ti < _torrentFilePaths.length; ti++)
+                _buildTorrentFileEntry(ti, c, s),
               const SizedBox(height: 8),
+              // ── Add more / clear buttons ──────────────────────────────
               Row(
                 children: [
                   ShadButton.outline(
                     size: ShadButtonSize.sm,
-                    enabled: !_isPicking,
+                    enabled: !_isPicking && !_isProbing,
                     onPressed: _pickTorrentFiles,
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
@@ -565,7 +944,14 @@ class _NewDownloadDialogContentState extends State<_NewDownloadDialogContent> {
                   ),
                   const SizedBox(width: 8),
                   GestureDetector(
-                    onTap: () => setState(() => _torrentFilePaths.clear()),
+                    onTap: () => setState(() {
+                      _torrentFilePaths.clear();
+                      _torrentMeta.clear();
+                      _torrentSelections.clear();
+                      _probingPath = null;
+                      _isProbing = false;
+                      _probeError = '';
+                    }),
                     child: Text(
                       s.cancel,
                       style: TextStyle(
@@ -578,7 +964,7 @@ class _NewDownloadDialogContentState extends State<_NewDownloadDialogContent> {
                 ],
               ),
               const SizedBox(height: 14),
-            ] else ...[
+            ] else if (!_hasTorrentFiles && _btWaitPhase == null) ...[
               // URL 输入区 — 始终多行
               Row(
                 children: [
@@ -905,6 +1291,93 @@ class _NewDownloadDialogContentState extends State<_NewDownloadDialogContent> {
           ],
         ),
       ),
+    );
+  }
+
+  /// 构建磁力链接等待阶段的 actions 按钮
+  List<Widget> _buildBtWaitActions(S s, AppColors c) {
+    if (_btWaitPhase == 'probing') {
+      // 解析中：只显示取消按钮
+      return [
+        ShadButton.outline(
+          onPressed: _onBtSelectionCancelled,
+          child: Text(s.cancel),
+        ),
+      ];
+    }
+    // selecting 阶段
+    return [
+      ShadButton.outline(
+        onPressed: _onBtSelectionCancelled,
+        child: Text(s.cancel),
+      ),
+      ShadButton(
+        onPressed: _btSelectedIndices.isEmpty ? null : _onBtSelectionConfirmed,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(LucideIcons.download, size: 13, color: Colors.white),
+            const SizedBox(width: 6),
+            Text(
+              s.btFileSelectConfirm(
+                _btSelectedIndices.length,
+                formatBtFileSize(_btSelectedTotalBytes),
+              ),
+              style: const TextStyle(color: Colors.white),
+            ),
+          ],
+        ),
+      ),
+    ];
+  }
+
+  /// 构建磁力链接等待阶段的对话框主体
+  Widget _buildBtWaitBody(S s, AppColors c) {
+    if (_btWaitPhase == 'probing') {
+      // 解析中：loading 动画
+      return Container(
+        padding: const EdgeInsets.symmetric(vertical: 32),
+        alignment: Alignment.center,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(
+              width: 28,
+              height: 28,
+              child: CircularProgressIndicator(strokeWidth: 2.5, color: c.accent),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              s.btResolvingMagnet,
+              style: TextStyle(fontSize: 13, color: c.textMuted),
+            ),
+          ],
+        ),
+      );
+    }
+    // selecting 阶段：文件列表
+    return BtFileListWidget(
+      files: _btFiles,
+      selectedIndices: _btSelectedIndices,
+      onToggleAll: () {
+        setState(() {
+          if (_btSelectedIndices.length == _btFiles.length) {
+            _btSelectedIndices = {};
+          } else {
+            _btSelectedIndices = _btFiles.map((f) => f.index.toInt()).toSet();
+          }
+        });
+      },
+      onToggleFile: (idx) {
+        setState(() {
+          if (_btSelectedIndices.contains(idx)) {
+            _btSelectedIndices = Set.from(_btSelectedIndices)..remove(idx);
+          } else {
+            _btSelectedIndices = Set.from(_btSelectedIndices)..add(idx);
+          }
+        });
+      },
+      maxHeight: 340,
     );
   }
 

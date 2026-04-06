@@ -16,10 +16,10 @@ use crate::signals::{
     BatchControlTask, BatchCreateTask, CheckFileAssociation, CheckForUpdate, CheckUrlProtocol,
     ConfigEntry, ConfigLoaded, ConfirmExternalDownload, ControlTask, CreateQueue, CreateTask,
     DeleteQueue, DetectSystemProxy, DownloadUpdate, ExternalDownloadRequest, FileAssociationStatus,
-    InstallUpdate, MoveTaskToQueue, ProxyTestResult, RequestAllQueues, RequestAllTasks,
-    RequestConfig, SaveConfig, SelectHlsQuality, SetFileAssociation, SetPriorityTask,
-    SetUrlProtocol, SystemProxyInfo, TestProxyConnection, UpdateCheckResult, UpdateQueue,
-    UrlProtocolStatus,
+    InstallUpdate, MoveTaskToQueue, ProbeTorrentMeta, ProxyTestResult, RequestAllQueues,
+    RequestAllTasks, RequestConfig, SaveConfig, SelectBtFiles, SelectHlsQuality,
+    SetFileAssociation, SetPriorityTask, SetUrlProtocol, SystemProxyInfo, TestProxyConnection,
+    UpdateCheckResult, UpdateQueue, UrlProtocolStatus,
 };
 use crate::updater;
 
@@ -221,6 +221,8 @@ pub async fn run(db_dir: PathBuf) {
     let set_url_proto_recv = SetUrlProtocol::get_dart_signal_receiver();
     let check_url_proto_recv = CheckUrlProtocol::get_dart_signal_receiver();
     let set_priority_recv = SetPriorityTask::get_dart_signal_receiver();
+    let select_bt_files_recv = SelectBtFiles::get_dart_signal_receiver();
+    let probe_torrent_meta_recv = ProbeTorrentMeta::get_dart_signal_receiver();
 
     // Spawn the Native Messaging listener (reads from stdin in a blocking thread).
     // When the browser extension sends a download request, it arrives on this channel.
@@ -258,7 +260,7 @@ pub async fn run(db_dir: PathBuf) {
             Some(signal) = create_recv.recv() => {
                 let msg = signal.message;
                 manager
-                    .create_task(msg.url, msg.save_dir, msg.file_name, msg.segments, msg.cookies, String::new(), 0, msg.torrent_file_bytes, msg.proxy_url, msg.user_agent, msg.queue_id, msg.checksum, HashMap::new())
+                    .create_task(msg.url, msg.save_dir, msg.file_name, msg.segments, msg.cookies, String::new(), 0, msg.torrent_file_bytes, msg.proxy_url, msg.user_agent, msg.queue_id, msg.checksum, HashMap::new(), msg.selected_file_indices)
                     .await;
                 // 立即推送 AllTasks，确保 Dart 端在收到 TaskProgress 之前
                 // 已通过 AllTasks 获得正确的 queue_id，防止新任务被错误归入默认队列。
@@ -272,7 +274,7 @@ pub async fn run(db_dir: PathBuf) {
                 );
                 for entry in msg.entries {
                     manager
-                        .create_task(entry.url, msg.save_dir.clone(), entry.file_name, msg.segments, msg.cookies.clone(), msg.referrer.clone(), 0, Vec::new(), msg.proxy_url.clone(), msg.user_agent.clone(), msg.queue_id.clone(), entry.checksum, HashMap::new())
+                        .create_task(entry.url, msg.save_dir.clone(), entry.file_name, msg.segments, msg.cookies.clone(), msg.referrer.clone(), 0, Vec::new(), msg.proxy_url.clone(), msg.user_agent.clone(), msg.queue_id.clone(), entry.checksum, HashMap::new(), Vec::new())
                         .await;
                 }
                 // 批量创建完成后统一推送一次 AllTasks，同步 queue_id 到 Dart。
@@ -443,7 +445,7 @@ pub async fn run(db_dir: PathBuf) {
                     extra_headers.len(),
                 );
                 manager
-                    .create_task(msg.url, msg.save_dir, msg.file_name, msg.segments, msg.cookies, msg.referrer, msg.hint_file_size, Vec::new(), msg.proxy_url, msg.user_agent, msg.queue_id, String::new(), extra_headers)
+                    .create_task(msg.url, msg.save_dir, msg.file_name, msg.segments, msg.cookies, msg.referrer, msg.hint_file_size, Vec::new(), msg.proxy_url, msg.user_agent, msg.queue_id, String::new(), extra_headers, Vec::new())
                     .await;
                 // 推送 AllTasks 确保 Dart 端获得正确 queue_id。
                 manager.load_and_send_all_tasks().await;
@@ -671,6 +673,32 @@ pub async fn run(db_dir: PathBuf) {
                             }.send_signal_to_dart();
                         }
                     }
+                });
+            }
+            // --- BT file selection ---
+            Some(signal) = select_bt_files_recv.recv() => {
+                let msg = signal.message;
+                log_info!(
+                    "[actor] SelectBtFiles: task={}, selected={:?}",
+                    msg.task_id,
+                    msg.selected_indices,
+                );
+                manager.deliver_bt_file_selection(&msg.task_id, msg.selected_indices).await;
+            }
+            // --- Torrent meta probe (for new-download dialog preview) ---
+            Some(signal) = probe_torrent_meta_recv.recv() => {
+                let msg = signal.message;
+                log_info!(
+                    "[actor] ProbeTorrentMeta: probe_id={}, bytes={}",
+                    msg.probe_id,
+                    msg.torrent_bytes.len(),
+                );
+                // Pure local parse — run in a blocking thread to avoid
+                // blocking the current_thread runtime.
+                let probe_id = msg.probe_id;
+                let bytes = msg.torrent_bytes;
+                tokio::task::spawn_blocking(move || {
+                    bt_downloader::probe_torrent_meta(probe_id, bytes);
                 });
             }
         }

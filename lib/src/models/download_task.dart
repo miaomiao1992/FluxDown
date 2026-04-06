@@ -211,6 +211,16 @@ class DownloadTask {
   /// 所属命名队列 ID（空字符串 = 默认队列）。
   final String queueId;
 
+  /// 文件名是否已由 Rust 引擎或 DB 确认（非占位符）。
+  ///
+  /// 设为 true 的时机：
+  ///   - [fromTaskInfo]：DB 中有非空文件名
+  ///   - [applyProgress]：收到 Rust 下载引擎发来的非空 file_name
+  ///
+  /// 用途：阻止后台 meta_prober 的 [TaskMetaProbed] 信号覆盖用户已设置的
+  /// 自定义文件名。只要此字段为 true，probe 结果中的文件名将被忽略。
+  final bool fileNameConfirmed;
+
   DownloadTask({
     required this.id,
     required this.url,
@@ -226,22 +236,27 @@ class DownloadTask {
     this.recentSplits = const [],
     this.queuePosition = -1,
     this.queueId = '',
+    this.fileNameConfirmed = false,
     DateTime? createdAt,
   }) : createdAt = createdAt ?? DateTime.now();
 
   /// 从 AllTasks 信号中的 TaskInfo 构建
   factory DownloadTask.fromTaskInfo(TaskInfo info) {
     final seconds = int.tryParse(info.createdAt) ?? 0;
+    // DB 中有非空文件名，说明 Rust 已确认过（create_task 写入的用户名或
+    // 下载引擎 update_task_file_info 写入的实际名），标记为已确认。
+    final hasName = info.fileName.isNotEmpty;
     return DownloadTask(
       id: info.taskId,
       url: info.url,
-      fileName: info.fileName.isEmpty ? currentS.unknownFile : info.fileName,
+      fileName: hasName ? info.fileName : currentS.unknownFile,
       saveDir: info.saveDir,
       status: taskStatusFromInt(info.status),
       downloadedBytes: info.downloadedBytes,
       totalBytes: info.totalBytes,
       errorMessage: info.errorMessage,
       queueId: info.queueId,
+      fileNameConfirmed: hasName,
       createdAt: seconds > 0
           ? DateTime.fromMillisecondsSinceEpoch(seconds * 1000)
           : DateTime.now(),
@@ -263,6 +278,7 @@ class DownloadTask {
     List<SplitEventData>? recentSplits,
     int? queuePosition,
     String? queueId,
+    bool? fileNameConfirmed,
     DateTime? createdAt,
   }) {
     return DownloadTask(
@@ -280,6 +296,7 @@ class DownloadTask {
       recentSplits: recentSplits ?? this.recentSplits,
       queuePosition: queuePosition ?? this.queuePosition,
       queueId: queueId ?? this.queueId,
+      fileNameConfirmed: fileNameConfirmed ?? this.fileNameConfirmed,
       createdAt: createdAt ?? this.createdAt,
     );
   }
@@ -291,14 +308,20 @@ class DownloadTask {
     // 非下载状态强制归零，防止残留值。
     final int displaySpeed = newStatus == TaskStatus.downloading ? p.speed : 0;
 
+    // 收到 Rust 下载引擎发来的非空文件名，视为已确认（用户输入或引擎解析）。
+    // 一旦确认，后续 TaskMetaProbed 不再覆盖此名字。
+    final nameFromProgress = p.fileName.isNotEmpty ? p.fileName : null;
+    final nowConfirmed = fileNameConfirmed || nameFromProgress != null;
+
     return copyWith(
       status: newStatus,
       downloadedBytes: p.downloadedBytes,
       totalBytes: p.totalBytes > 0 ? p.totalBytes : null,
       speed: displaySpeed,
-      fileName: p.fileName.isNotEmpty ? p.fileName : null,
+      fileName: nameFromProgress,
       saveDir: p.saveDir.isNotEmpty ? p.saveDir : null,
       errorMessage: p.errorMessage,
+      fileNameConfirmed: nowConfirmed,
     );
   }
 

@@ -47,7 +47,7 @@ pub async fn probe_task_meta(
 
     // ftp:// — 使用现有 FTP 解析逻辑
     if lower_prefix.starts_with("ftp://") {
-        return probe_ftp_meta(url, proxy_config).await;
+        return probe_ftp_meta(url, file_name, proxy_config).await;
     }
 
     // HTTP / HTTPS
@@ -103,6 +103,7 @@ fn url_decode(s: &str) -> String {
 
 async fn probe_ftp_meta(
     url: &str,
+    file_name: &str, // DB 中已有的文件名；非空则跳过名称覆盖（与 HTTP guard 对称）
     proxy_config: &crate::proxy_config::ProxyConfig,
 ) -> (String, i64) {
     let result = tokio::time::timeout(
@@ -111,7 +112,17 @@ async fn probe_ftp_meta(
     )
     .await;
     match result {
-        Ok(Ok(info)) => (info.file_name, info.total_bytes),
+        Ok(Ok(info)) => {
+            // If the user already set a custom file name, do not let the
+            // server-side name overwrite it.  Return an empty name so the
+            // caller skips the DB update (mirrors probe_http_meta behaviour).
+            let name = if file_name.is_empty() {
+                info.file_name
+            } else {
+                String::new()
+            };
+            (name, info.total_bytes)
+        }
         _ => (String::new(), 0),
     }
 }

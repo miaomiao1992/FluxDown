@@ -1438,7 +1438,12 @@ async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
     //    0   — no hint, run normal probe
     let info = if p.hint_file_size != 0 {
         let name = if p.file_name.is_empty() {
-            extract_filename(&reqwest::header::HeaderMap::new(), &p.url)
+            // Hint mode skips the HEAD probe entirely, so we have no response
+            // headers to extract the filename from.  Try the URL path first;
+            // if that also yields nothing (e.g. "/download?token=abc") fall
+            // back to "download" so we never end up with an empty dest_path
+            // that would point at the save directory itself.
+            extract_from_url(&p.url).unwrap_or_else(|| "download".to_string())
         } else {
             p.file_name.clone()
         };
@@ -1527,6 +1532,18 @@ async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
     };
 
     let save_dir = PathBuf::from(&p.save_dir);
+
+    // Safety net: if filename is still empty after all resolution attempts,
+    // abort early with a clear error instead of silently using save_dir as
+    // the destination path (which would cause an OS-level write error or
+    // corrupt the directory).
+    if auto_name.is_empty() {
+        return Err(DownloadError::Other(
+            "could not determine a file name for this download — \
+             please retry and specify a file name manually"
+                .to_string(),
+        ));
+    }
 
     // When resuming, the file on disk belongs to *this* task — skip dedup.
     // For new downloads, dedup to avoid overwriting unrelated files.

@@ -17,6 +17,7 @@
 //! - `add_torrent` blocks while resolving magnet metadata from DHT/peers, so
 //!   we report "preparing" status to Dart while we wait.
 
+use rinf::RustSignal;
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
@@ -300,6 +301,9 @@ pub struct SharedBtSession {
     /// keeps the listening port bound.  Creating a new session while the old
     /// port is still in use causes the next BT task to fail immediately.
     inflight_adds: AtomicUsize,
+    /// Stores user's file selection for BT tasks awaiting the dialog.
+    /// Key: task_id, Value: selected file indices.
+    file_selection_map: Mutex<HashMap<String, Vec<i32>>>,
 }
 
 impl SharedBtSession {
@@ -471,6 +475,7 @@ impl SharedBtSession {
             handles: Mutex::new(HashMap::new()),
             pending_deletes: Mutex::new(HashMap::new()),
             inflight_adds: AtomicUsize::new(0),
+            file_selection_map: Mutex::new(HashMap::new()),
         })
     }
 
@@ -624,6 +629,18 @@ impl SharedBtSession {
         self.pending_deletes.lock().await.remove(task_id)
     }
 
+    /// Called by the actor when the user submits their BT file selection.
+    pub async fn deliver_file_selection(&self, task_id: &str, indices: Vec<i32>) {
+        let mut map = self.file_selection_map.lock().await;
+        map.insert(task_id.to_string(), indices);
+    }
+
+    /// Poll for a pending file selection. Returns Some if available and removes the entry.
+    pub async fn take_file_selection(&self, task_id: &str) -> Option<Vec<i32>> {
+        let mut map = self.file_selection_map.lock().await;
+        map.remove(task_id)
+    }
+
     fn increment_inflight_add(&self) {
         self.inflight_adds.fetch_add(1, Ordering::Relaxed);
     }
@@ -678,6 +695,13 @@ pub struct BtDownloadParams {
     /// If resuming a paused torrent, this is the existing handle.
     /// When `Some`, we skip `add_torrent` and go straight to the progress loop.
     pub existing_handle: Option<BtHandle>,
+    /// Pre-selected file indices (from the new-download dialog).
+    /// Empty = show the file selection dialog after metadata resolves.
+    pub pre_selected_indices: Vec<i32>,
+    /// Skip Phase 3.5 file selection dialog entirely.
+    /// Set to true when resuming a task whose confirmed selection is persisted
+    /// in the DB as "all files" — no update_only_files needed either.
+    pub skip_file_selection: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -757,6 +781,8 @@ pub async fn run_bt_download(params: BtDownloadParams) -> Result<(), DownloadErr
         session,
         shared_bt,
         existing_handle,
+        pre_selected_indices: params.pre_selected_indices,
+        skip_file_selection: params.skip_file_selection,
     };
     let result = bt_runtime
         .spawn(async move { bt_download_inner(inner_params).await })
@@ -804,6 +830,12 @@ struct BtInnerParams {
     session: Arc<Session>,
     shared_bt: Arc<SharedBtSession>,
     existing_handle: Option<BtHandle>,
+    /// Pre-selected file indices forwarded from the CreateTask signal.
+    /// Non-empty = skip the BtFilesInfo dialog and use these directly.
+    pre_selected_indices: Vec<i32>,
+    /// When true, skip Phase 3.5 entirely (user already confirmed all files
+    /// on a previous run — resume without re-showing the dialog).
+    skip_file_selection: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1151,7 +1183,15 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
         session,
         shared_bt,
         existing_handle,
+        pre_selected_indices,
+        skip_file_selection,
     } = p;
+
+    // Record whether this is a resume of an existing handle *before*
+    // existing_handle is moved into Phase 2.  When true we skip Phase 3.5
+    // entirely because librqbit already retains the previous update_only_files
+    // state internally.
+    let had_existing_handle = existing_handle.is_some();
     // -----------------------------------------------------------------------
     // Phase 1: Send initial file name from dn= parameter so user sees something
     // -----------------------------------------------------------------------
@@ -1382,6 +1422,224 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
         total_pieces,
         &staging_item_name,
     );
+
+    // -----------------------------------------------------------------------
+    // Phase 3.5: Send file list to Dart and wait for user file selection.
+    // -----------------------------------------------------------------------
+
+    // Count files for potential fallback (select-all).
+    let file_count = handle
+        .with_metadata(|meta| meta.file_infos.len())
+        .unwrap_or(0);
+
+    // -----------------------------------------------------------------------
+    // Phase 3.5 — File selection.
+    //
+    // Three paths:
+    //
+    // R) Resume with existing in-memory handle (same app session):
+    //    librqbit already has the correct update_only_files state.
+    //    Skip everything — no DB read, no signal, no dialog.
+    //    Use a full-range placeholder so update_only_files is NOT called.
+    //
+    // A) Pre-selected indices provided (new-download dialog OR DB-restored):
+    //    The user's selection is already known.  Apply it via update_only_files
+    //    so librqbit downloads only the chosen files (needed when re-adding
+    //    after app restart because the fresh session starts with all files).
+    //    No dialog shown.
+    //
+    // B) No pre-selection (first-time magnet link with no prior choice):
+    //    Send BtFilesInfo to Dart so the file-selection dialog is shown.
+    //    Persist the confirmed selection to DB so future resumes use Path A.
+    //    Poll until the user confirms or the task is cancelled.
+    // -----------------------------------------------------------------------
+
+    let selected_indices: Vec<i32> = if had_existing_handle {
+        // Path R — in-memory handle reused, librqbit state intact.
+        log_info!(
+            "[BT] task={} resumed from existing handle, skipping file selection",
+            short_id(&task_id)
+        );
+        (0..file_count as i32).collect()
+    } else if skip_file_selection {
+        // Path S — user previously confirmed "all files"; DB recorded this.
+        // librqbit defaults to downloading everything after re-add, which is
+        // exactly what we want — no update_only_files call needed.
+        // Use a full-range vec so the len == file_count guard skips the call.
+        log_info!(
+            "[BT] task={} skip_file_selection=true, downloading all files (no dialog)",
+            short_id(&task_id)
+        );
+        (0..file_count as i32).collect()
+    } else if !pre_selected_indices.is_empty() {
+        // Path A — partial selection already known (new-download dialog or DB restore).
+        log_info!(
+            "[BT] task={} using pre-selected {} file(s) (no dialog)",
+            short_id(&task_id),
+            pre_selected_indices.len()
+        );
+        pre_selected_indices
+    } else {
+        // Path B — no pre-selection: build file list and send to Dart.
+        // Filter out BEP-47 padding files — they are an implementation detail
+        // and must not be shown to the user.  We keep the true meta index
+        // (idx from enumerate) so that the indices forwarded to
+        // update_only_files always refer to the correct meta.file_infos slot.
+        let bt_files = handle
+            .with_metadata(|meta| {
+                meta.file_infos
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, fi)| {
+                        // BEP-47 padding files are stored under a ".pad"
+                        // directory component.  Use a path-based heuristic
+                        // because FileInfos does not expose the attrs field.
+                        let name = fi.relative_filename.to_string_lossy();
+                        !name.contains("/.pad/")
+                            && !name.contains("\\.pad\\")
+                            && !fi
+                                .relative_filename
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("")
+                                .starts_with(".pad")
+                    })
+                    .map(|(idx, fi)| crate::signals::BtFileEntry {
+                        index: idx as i32,
+                        path: fi.relative_filename.to_string_lossy().into_owned(),
+                        size: fi.len as i64,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        crate::signals::BtFilesInfo {
+            task_id: task_id.clone(),
+            total_bytes,
+            files: bt_files,
+        }
+        .send_signal_to_dart();
+
+        log_info!(
+            "[BT] task={} BtFilesInfo sent ({} files), waiting for user selection...",
+            short_id(&task_id),
+            file_count
+        );
+
+        // Poll until the user responds or the task is cancelled.
+        loop {
+            if cancelled.load(Ordering::SeqCst) {
+                return Err(DownloadError::Cancelled);
+            }
+            if let Some(indices) = shared_bt.take_file_selection(&task_id).await {
+                log_info!(
+                    "[BT] task={} file selection received: {:?}",
+                    short_id(&task_id),
+                    &indices
+                );
+                break indices;
+            }
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+    };
+
+    // Persist the confirmed selection to DB immediately so that future
+    // resumes (including across app restarts) bypass the file-selection
+    // dialog entirely.  We only persist when the selection came from user
+    // interaction (Path B) or was pre-supplied (Path A when !had_existing_handle).
+    // Path R (had_existing_handle) skips this because selected_indices is a
+    // placeholder full-range vec and the real selection is already in the DB.
+    // Persist the confirmed selection so future resumes skip the dialog.
+    // Skip when:
+    //   - had_existing_handle: DB already has the right value from the first run.
+    //   - skip_file_selection: already persisted as "all", no change needed.
+    //   - selected_indices starts with -1: user cancelled, leave DB empty so
+    //     the dialog reappears on next resume (user can pick again).
+    if !had_existing_handle && !skip_file_selection && selected_indices.first().copied() != Some(-1)
+    {
+        let is_all = selected_indices.len() >= file_count;
+        let indices_to_save: &[i32] = if is_all { &[] } else { &selected_indices };
+        let _ = db
+            .save_bt_selected_files(&task_id, indices_to_save, is_all)
+            .await;
+        log_info!(
+            "[BT] task={} persisted file selection ({}/{} files, is_all={}) to DB",
+            short_id(&task_id),
+            selected_indices.len(),
+            file_count,
+            is_all
+        );
+    }
+
+    // [-1] is the sentinel sent by Dart when the user explicitly cancels the
+    // file selection dialog.  Pause the task (status=2) so the user can
+    // resume it later and pick files again, rather than leaving it in an
+    // ambiguous state or marking it as error.
+    if selected_indices.first().copied() == Some(-1) {
+        log_info!(
+            "[BT] task={} file selection cancelled by user → pausing",
+            short_id(&task_id)
+        );
+        // Persist paused status to DB so it survives app restart.
+        let _ = db.update_task_status(&task_id, STATUS_PAUSED, "").await;
+        // Pause the librqbit torrent so it stops seeding / connecting.
+        let _ = shared_bt.pause_task(&task_id).await;
+        // Notify Dart so the UI immediately shows "Paused".
+        let _ = progress_tx
+            .send(ProgressUpdate {
+                task_id: task_id.clone(),
+                downloaded_bytes: 0,
+                total_bytes,
+                status: STATUS_PAUSED,
+                error_message: String::new(),
+                file_name: resolved_name.clone(),
+                segment_details: None,
+            })
+            .await;
+        // Return Cancelled so the manager does not overwrite our status=2.
+        return Err(DownloadError::Cancelled);
+    }
+
+    // If user selected nothing (should not happen in practice), fall back to
+    // downloading all files.
+    let selected_indices = if selected_indices.is_empty() {
+        (0..file_count as i32).collect::<Vec<_>>()
+    } else {
+        selected_indices
+    };
+
+    // Restrict to selected files when only a subset was chosen.
+    // Path R (had_existing_handle) produces selected_indices.len() == file_count
+    // so update_only_files is skipped — librqbit already has the right state.
+    // Path A and Path B both need to apply the selection on a fresh add_torrent.
+    if selected_indices.len() < file_count {
+        let only: HashSet<usize> = selected_indices.iter().map(|&i| i as usize).collect();
+        if let Err(e) = session.update_only_files(&handle, &only).await {
+            log_info!(
+                "[BT] task={} update_only_files error: {} — downloading all",
+                short_id(&task_id),
+                e
+            );
+        }
+    }
+
+    // Recompute total_bytes based on selected files only for accurate progress display.
+    let total_bytes = {
+        let selected_total: i64 = handle
+            .with_metadata(|meta| {
+                selected_indices
+                    .iter()
+                    .filter_map(|&i| meta.file_infos.get(i as usize))
+                    .map(|fi| fi.len as i64)
+                    .sum()
+            })
+            .unwrap_or(total_bytes);
+        if selected_total > 0 && selected_total <= total_bytes {
+            selected_total
+        } else {
+            total_bytes
+        }
+    };
 
     let _ = db
         .update_task_file_info(&task_id, &resolved_name, total_bytes)
@@ -1767,6 +2025,79 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
         // acceptable since the manager layer handles session.pause() directly.
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
+}
+
+/// Parse a raw `.torrent` file's file list without creating a download task.
+///
+/// This is used by the new-download dialog to preview torrent contents
+/// before the user confirms the download.  It is purely local (no network).
+pub fn probe_torrent_meta(probe_id: String, torrent_bytes: Vec<u8>) {
+    // librqbit re-exports librqbit_core::torrent_metainfo::* at the crate root,
+    // so torrent_from_bytes_ext and ByteBuf are both accessible via librqbit::.
+    use librqbit::{ByteBuf, torrent_from_bytes_ext};
+
+    let result: Result<crate::signals::TorrentMetaResult, String> = (|| {
+        // ByteBuf<'_> borrows torrent_bytes; the parsed value must not outlive it.
+        let parsed = torrent_from_bytes_ext::<ByteBuf<'_>>(&torrent_bytes)
+            .map_err(|e| format!("torrent parse error: {e}"))?;
+        let info = &parsed.meta.info;
+
+        // Build file list. For single-file torrents this yields one entry.
+        let mut files: Vec<crate::signals::BtFileEntry> = Vec::new();
+        let mut total_bytes: i64 = 0;
+        for (idx, fd) in info
+            .iter_file_details()
+            .map_err(|e| format!("iter_file_details error: {e}"))?
+            .enumerate()
+        {
+            // Skip padding files (BEP-47).
+            let attrs: librqbit::FileDetailsAttrs = fd.attrs();
+            if attrs.padding {
+                continue;
+            }
+            let path = fd
+                .filename
+                .to_string()
+                .unwrap_or_else(|_| format!("file_{idx}"));
+            let size = fd.len as i64;
+            total_bytes += size;
+            files.push(crate::signals::BtFileEntry {
+                index: idx as i32,
+                path,
+                size,
+            });
+        }
+
+        let name = info
+            .name
+            .as_ref()
+            .and_then(|n: &ByteBuf<'_>| std::str::from_utf8(n.as_ref()).ok())
+            .unwrap_or("Unknown")
+            .to_owned();
+
+        Ok(crate::signals::TorrentMetaResult {
+            probe_id: probe_id.clone(),
+            name,
+            total_bytes,
+            files,
+            error: String::new(),
+        })
+    })();
+
+    let signal = match result {
+        Ok(r) => r,
+        Err(e) => {
+            log_info!("[BT] probe_torrent_meta error: {}", e);
+            crate::signals::TorrentMetaResult {
+                probe_id,
+                name: String::new(),
+                total_bytes: 0,
+                files: Vec::new(),
+                error: e,
+            }
+        }
+    };
+    signal.send_signal_to_dart();
 }
 
 #[cfg(test)]

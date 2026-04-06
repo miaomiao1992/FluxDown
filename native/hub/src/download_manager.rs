@@ -203,6 +203,9 @@ struct QueuedTask {
     checksum: String,
     /// 浏览器扩展捕获的额外 HTTP 请求头（如 Authorization）。
     extra_headers: std::collections::HashMap<String, String>,
+    /// Pre-selected file indices for BT downloads (from the new-download dialog).
+    /// Non-empty = skip the BtFilesInfo dialog.
+    selected_file_indices: Vec<i32>,
 }
 
 /// All state associated with a single actively-running download task.
@@ -803,6 +806,13 @@ impl DownloadManager {
         }
     }
 
+    /// Forward user's BT file selection to the waiting download task.
+    pub async fn deliver_bt_file_selection(&self, task_id: &str, indices: Vec<i32>) {
+        if let Some(bt) = self.bt_session.as_ref() {
+            bt.deliver_file_selection(task_id, indices).await;
+        }
+    }
+
     pub async fn load_and_send_all_tasks(&mut self) {
         // 启动时将残留的 downloading/pending 状态矫正为 paused（仅首次执行）
         // 后续由 create_task / batch_create 触发时不重复重置，避免将刚插入的
@@ -878,6 +888,7 @@ impl DownloadManager {
         queue_id: String,
         checksum: String,
         extra_headers: std::collections::HashMap<String, String>,
+        selected_file_indices: Vec<i32>,
     ) {
         let task_id = Uuid::new_v4().to_string();
         // When segments <= 0 ("auto"), store 0 in DB and let the downloader
@@ -946,6 +957,7 @@ impl DownloadManager {
             queue_id,
             checksum,
             extra_headers,
+            selected_file_indices,
         };
         if is_bt || (self.has_capacity() && self.has_queue_capacity(&queued.queue_id)) {
             self.do_start_task(queued).await;
@@ -1012,6 +1024,7 @@ impl DownloadManager {
             queue_id,
             checksum,
             extra_headers,
+            selected_file_indices,
         } = queued;
 
         // Four-tier segment count priority:
@@ -1128,6 +1141,8 @@ impl DownloadManager {
                 bt_runtime: bt_ref.runtime_handle(),
                 shared_bt: bt_ref.clone(),
                 existing_handle: None,
+                pre_selected_indices: selected_file_indices,
+                skip_file_selection: false,
             };
 
             tokio::spawn(async move {
@@ -1434,6 +1449,7 @@ impl DownloadManager {
                     queue_id: t.queue_id,
                     checksum: t.checksum, // loaded from DB for integrity verification
                     extra_headers: std::collections::HashMap::new(), // 恢复任务无额外请求头
+                    selected_file_indices: Vec::new(), // resume tasks have no pre-selection
                 });
             }
         }
@@ -1604,6 +1620,43 @@ impl DownloadManager {
                 TorrentSource::Magnet(task.url.clone())
             };
 
+            // Load the persisted file selection from DB so that resumes
+            // (including across app restarts where the in-memory handle is
+            // gone) skip the file-selection dialog entirely.
+            //
+            // load_bt_selected_files returns:
+            //   None        — user never confirmed a selection → show dialog
+            //   Some([])    — user confirmed "all files" → skip dialog, no update_only_files
+            //   Some([…])   — user confirmed a subset → skip dialog, apply update_only_files
+            //
+            // When existing_handle is Some (same-session resume), librqbit
+            // already has the correct state; had_existing_handle=true in
+            // bt_download_inner skips Phase 3.5 regardless of what we pass here.
+            let (pre_selected_indices, skip_file_selection) = if existing.is_none() {
+                match self
+                    .db
+                    .load_bt_selected_files(task_id)
+                    .await
+                    .unwrap_or(None)
+                {
+                    None => {
+                        // Never confirmed — let Phase 3.5 show the dialog.
+                        (Vec::new(), false)
+                    }
+                    Some(indices) if indices.is_empty() => {
+                        // Confirmed "all files" — skip dialog, librqbit default is all.
+                        (Vec::new(), true)
+                    }
+                    Some(indices) => {
+                        // Confirmed subset — skip dialog, apply update_only_files.
+                        (indices, false)
+                    }
+                }
+            } else {
+                // Existing handle: had_existing_handle handles everything.
+                (Vec::new(), false)
+            };
+
             let bt_params = BtDownloadParams {
                 task_id: tid.clone(),
                 torrent_source,
@@ -1615,6 +1668,8 @@ impl DownloadManager {
                 bt_runtime: bt_ref.runtime_handle(),
                 shared_bt: bt_ref.clone(),
                 existing_handle: existing,
+                pre_selected_indices,
+                skip_file_selection,
             };
 
             tokio::spawn(async move {
@@ -1944,6 +1999,19 @@ impl DownloadManager {
                             let _ = tokio::fs::remove_file(&path).await;
                         }
                     }
+                    // Also clean up the task-scoped staging directory in the
+                    // deferred path: if the handle timed out the download task
+                    // may still be writing into the staging dir, so we give it
+                    // 2 s (the sleep above) before attempting removal.
+                    let stage_dir = bt_downloader::bt_stage_dir(&save_dir, &tid);
+                    if stage_dir.exists() {
+                        log_info!(
+                            "[manager] delete_task {} deferred: removing staging dir {}",
+                            tid,
+                            stage_dir.display()
+                        );
+                        let _ = tokio::fs::remove_dir_all(&stage_dir).await;
+                    }
                 } else {
                     let temp_path =
                         PathBuf::from(format!("{}{}", path.display(), crate::downloader::TEMP_EXT));
@@ -2047,6 +2115,11 @@ impl DownloadManager {
                 if is_bt_url(&t.url) {
                     let bt_session = self.bt_session.clone();
                     let safe = is_safe_file_name(&t.file_name);
+                    // Capture save_dir directly so the staging-dir path is
+                    // always correct even when file_name is empty (in which
+                    // case path == save_dir and path.parent() would be the
+                    // *parent* of save_dir — wrong).
+                    let save_dir_owned = t.save_dir.clone();
                     cleanup_futs.push(tokio::spawn(async move {
                         // Wait for this task's download handle (10s per-task timeout).
                         if let Some(h) = maybe_handle {
@@ -2060,7 +2133,10 @@ impl DownloadManager {
                                 bt.register_pending_delete(&tid_owned, delete_files).await;
                             }
                         }
-                        // BT file cleanup
+                        // BT file cleanup (final path, i.e. save_dir/file_name).
+                        // Only attempted when file_name is non-empty and safe;
+                        // covers the cross-session case where librqbit already
+                        // moved the file out of the staging directory.
                         if delete_files && safe {
                             let Ok(_permit) = sem.acquire().await else {
                                 return;
@@ -2072,13 +2148,17 @@ impl DownloadManager {
                             }
                         }
                         // Always clean up the task-scoped staging directory.
-                        // If the download was in progress, partial data lives
-                        // here.  If it finished and was moved, the dir is empty.
-                        let stage_dir = bt_downloader::bt_stage_dir(
-                            path.parent().and_then(|p| p.to_str()).unwrap_or(""),
-                            &tid_owned,
-                        );
+                        // Use save_dir_owned (the original DB value) rather than
+                        // path.parent() to avoid the empty-file_name edge case
+                        // where path == save_dir and path.parent() would be the
+                        // grandparent directory.
+                        let stage_dir = bt_downloader::bt_stage_dir(&save_dir_owned, &tid_owned);
                         if stage_dir.exists() {
+                            log_info!(
+                                "[manager] delete_tasks_batch {}: removing staging dir {}",
+                                tid_owned,
+                                stage_dir.display()
+                            );
                             let _ = tokio::fs::remove_dir_all(&stage_dir).await;
                         }
                         // Signal completion
@@ -2296,6 +2376,7 @@ impl DownloadManager {
                 queue_id: task_row.queue_id,
                 checksum: task_row.checksum,
                 extra_headers: std::collections::HashMap::new(), // 恢复任务无额外请求头
+                selected_file_indices: Vec::new(), // resume tasks have no pre-selection
             });
         }
     }
