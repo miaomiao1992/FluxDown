@@ -198,9 +198,9 @@ const RETRY_BASE_DELAY: Duration = Duration::from_secs(2);
 
 /// 单个 chunk 的读取超时（stall detection）。如果超过此时间没有收到任何数据，
 /// 视为连接停滞，返回错误触发 retry 机制（断开旧连接，用 Range 请求从断点续传）。
-/// 10 秒足够容忍正常的 CDN 抖动，又能快速从真正卡死的连接中恢复。
+/// 5 秒足够容忍正常的 CDN 抖动，又能快速从真正卡死的连接中恢复。
 /// 这解决了大文件下载到 98%+ 时 TCP 连接卡死、速度趋近 0 的问题。
-const CHUNK_STALL_TIMEOUT: Duration = Duration::from_secs(10);
+const CHUNK_STALL_TIMEOUT: Duration = Duration::from_secs(5);
 
 // ---------------------------------------------------------------------------
 // Segment state
@@ -925,11 +925,27 @@ pub async fn run_coordinated_download(
             _ = proactive_interval.tick() => {
                 if !serial_mode && !all_done(&segments) {
                     sync_downloaded_from_shared(&mut segments, &seg_states);
-                    if let Some(next) = try_proactive_split(
+                    // Try proactive split at the normal threshold first; if that fails
+                    // (last segment has < current_min_split but >= TAIL_MIN_SPLIT_BYTES
+                    // remaining), also try the tail micro threshold so the proactive
+                    // timer covers the full range from current_min_split down to 64 KB.
+                    let work = try_proactive_split(
                         &mut segments,
                         &mut next_index,
                         current_min_split,
-                    ) {
+                    )
+                    .or_else(|| {
+                        if current_min_split > TAIL_MIN_SPLIT_BYTES {
+                            try_proactive_split(
+                                &mut segments,
+                                &mut next_index,
+                                TAIL_MIN_SPLIT_BYTES,
+                            )
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(next) = work {
                         let new_seg_idx = next.assignment.seg_index;
                         persist_segment_change(
                             db, task_id, &segments,
@@ -1183,7 +1199,14 @@ fn try_split_largest(
     next_index: &mut i32,
     min_split: i64,
 ) -> Option<NextWork> {
-    if segments.len() >= MAX_SEGMENTS as usize {
+    // Only count non-Completed segments — Completed slots do not contribute
+    // to the concurrent-connection limit. This allows idle workers to keep
+    // helping the last active segment even after many historical splits.
+    let active_or_pending = segments
+        .values()
+        .filter(|s| s.state != SegState::Completed)
+        .count();
+    if active_or_pending >= MAX_SEGMENTS as usize {
         return None;
     }
 
@@ -1281,7 +1304,14 @@ fn try_proactive_split(
         return None;
     }
 
-    if segments.len() >= MAX_SEGMENTS as usize {
+    // Only count non-Completed segments — Completed slots do not contribute
+    // to the concurrent-connection limit. This allows idle workers to keep
+    // helping the last active segment even after many historical splits.
+    let active_or_pending = segments
+        .values()
+        .filter(|s| s.state != SegState::Completed)
+        .count();
+    if active_or_pending >= MAX_SEGMENTS as usize {
         return None;
     }
 
@@ -2189,6 +2219,77 @@ mod tests {
         let mut next_idx = MAX_SEGMENTS;
         let result = try_split_largest(&mut segs, &mut next_idx, MIN_SPLIT_BYTES);
         assert!(result.is_none(), "should not exceed MAX_SEGMENTS");
+    }
+
+    /// After Fix 1: completed segments do not count toward MAX_SEGMENTS.
+    /// 63 Completed + 1 Active of 10 MB should allow a split because
+    /// active_or_pending = 1 < MAX_SEGMENTS = 64.
+    #[test]
+    fn split_allowed_when_completed_segments_free_slots() {
+        let total_bytes: i64 = 10_000_000;
+        let mut segs = BTreeMap::new();
+        // 63 completed segments (minimal placeholder ranges).
+        for i in 0..(MAX_SEGMENTS - 1) {
+            segs.insert(i, make_seg(i, i as i64, i as i64, 1, SegState::Completed));
+        }
+        // 1 active segment with 10 MB remaining (well above MIN_SPLIT_BYTES).
+        segs.insert(
+            MAX_SEGMENTS - 1,
+            make_seg(MAX_SEGMENTS - 1, 0, total_bytes - 1, 0, SegState::Active),
+        );
+        let mut next_idx = MAX_SEGMENTS;
+
+        // With old code: segments.len() == 64 → None (workers retired).
+        // With fix: active_or_pending == 1 < 64 → should split successfully.
+        let result = try_split_largest(&mut segs, &mut next_idx, MIN_SPLIT_BYTES);
+        assert!(
+            result.is_some(),
+            "completed segments must not prevent splits of the remaining active segment"
+        );
+        // next_idx must have been incremented, confirming a new segment was created.
+        assert_eq!(
+            next_idx,
+            MAX_SEGMENTS + 1,
+            "next_idx must advance after a successful split"
+        );
+        // The new segment must exist in the map.
+        assert!(
+            segs.contains_key(&MAX_SEGMENTS),
+            "new segment must be inserted into the map"
+        );
+        // Note: validate_coverage is intentionally omitted here because the 63
+        // Completed placeholder segments use non-contiguous byte ranges (they are
+        // stand-ins for "historically finished" slots, not a valid byte layout).
+        // The purpose of this test is solely to verify that the active_or_pending
+        // count check allows the split; byte-range integrity is covered by the
+        // split_consecutive_splits_maintain_coverage and split_largest_basic tests.
+    }
+
+    /// MAX_SEGMENTS still limits truly concurrent connections:
+    /// when 64 Active/Pending segments exist, no further split is allowed.
+    #[test]
+    fn split_blocked_when_max_active_segments_reached() {
+        let mut segs = BTreeMap::new();
+        for i in 0..MAX_SEGMENTS {
+            segs.insert(
+                i,
+                make_seg(
+                    i,
+                    i as i64 * 1000,
+                    i as i64 * 1000 + 999,
+                    0,
+                    SegState::Active,
+                ),
+            );
+        }
+        let mut next_idx = MAX_SEGMENTS;
+
+        // active_or_pending == 64 >= MAX_SEGMENTS → must still return None.
+        let result = try_split_largest(&mut segs, &mut next_idx, MIN_SPLIT_BYTES);
+        assert!(
+            result.is_none(),
+            "must not exceed MAX_SEGMENTS active connections"
+        );
     }
 
     #[test]

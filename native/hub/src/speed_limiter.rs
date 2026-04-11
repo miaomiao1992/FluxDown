@@ -113,7 +113,19 @@ impl SpeedLimiter {
             }
 
             // No tokens available — wait for the refill task to notify us.
-            self.inner.notify.notified().await;
+            // Bounded wait guards against the rare TOCTOU race where
+            // notify_waiters() fires between our tokens.load() returning 0
+            // and the notified().await registration: since notify_waiters()
+            // only wakes *currently-registered* listeners, that notification
+            // would be silently lost.  The timeout (REFILL_INTERVAL_MS + 10 ms)
+            // ensures we retry within at most one extra refill cycle.
+            tokio::select! {
+                biased;
+                () = self.inner.notify.notified() => {}
+                () = tokio::time::sleep(std::time::Duration::from_millis(
+                    REFILL_INTERVAL_MS + 10,
+                )) => {}
+            }
         }
     }
 

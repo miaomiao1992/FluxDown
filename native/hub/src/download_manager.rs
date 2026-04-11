@@ -886,7 +886,8 @@ impl DownloadManager {
         // 启动时将残留的 downloading/pending 状态矫正为 paused（仅首次执行）
         // 后续由 create_task / batch_create 触发时不重复重置，避免将刚插入的
         // pending 任务误改为 paused 导致前端显示"已暂停"
-        if !self.startup_reset_done {
+        let is_first_run = !self.startup_reset_done;
+        if is_first_run {
             self.startup_reset_done = true;
             if let Err(e) = self.db.reset_incomplete_tasks_to_paused().await {
                 log_info!("reset_incomplete_tasks_to_paused error: {}", e);
@@ -900,6 +901,195 @@ impl DownloadManager {
                 Vec::new()
             }
         };
+
+        // On the very first call (app startup), scan all known save directories
+        // for orphaned BT staging directories left behind by a previous session
+        // that crashed or was force-killed before cleanup could run.
+        //
+        // We do this here because:
+        //   1. All live task IDs are now known (just loaded from DB above).
+        //   2. The BT session has not yet (re-)started any downloads, so no
+        //      staging directory is currently being written to.
+        //   3. `startup_reset_done` gates this to a single execution per
+        //      process lifetime, matching the intent of the startup-only reset.
+        if is_first_run {
+            // ---------------------------------------------------------------
+            // Startup staging-directory cleanup — three cases handled in one
+            // pass over all known save directories:
+            //
+            // A) staging dir belongs to a COMPLETED BT task
+            //    → The real file was already moved to its final location.
+            //      The staging dir should be empty (or contain only librqbit
+            //      placeholder files).  Delete it unconditionally.
+            //      Exception: if the move was interrupted (app crash between
+            //      stats.finished and move_path), rescue the file first.
+            //
+            // B) staging dir belongs to a PENDING/DOWNLOADING/PAUSED task
+            //    → Active download in progress (or paused mid-way).
+            //      Leave it alone — the downloader needs it.
+            //
+            // C) staging dir has no matching task in the DB (orphan)
+            //    → Left over from a previous session that crashed or was
+            //      force-killed before cleanup ran.  Delete it.
+            // ---------------------------------------------------------------
+
+            // Build per-task lookups we need during the directory scan.
+            // task_id → (status, save_dir, file_name, total_bytes)
+            let task_map: std::collections::HashMap<&str, (i32, &str, &str, i64)> = tasks
+                .iter()
+                .filter(|t| is_bt_url(&t.url))
+                .map(|t| {
+                    (
+                        t.task_id.as_str(),
+                        (
+                            t.status,
+                            t.save_dir.as_str(),
+                            t.file_name.as_str(),
+                            t.total_bytes,
+                        ),
+                    )
+                })
+                .collect();
+
+            // Collect every unique save_dir (including the global default so
+            // we catch staging dirs whose DB record was hard-deleted).
+            let mut save_dirs: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            save_dirs.insert(self.default_save_dir.as_str());
+            for t in &tasks {
+                save_dirs.insert(t.save_dir.as_str());
+            }
+
+            // Identify completed BT tasks whose staging dir still exists so
+            // we can attempt a rescue move before unconditional cleanup.
+            let rescue_input: Vec<(&str, &str, &str)> = task_map
+                .iter()
+                .filter_map(|(&id, (status, save_dir, file_name, _))| {
+                    if *status != 3 {
+                        return None;
+                    }
+                    let stage = bt_downloader::bt_stage_dir(save_dir, id);
+                    if stage.exists() {
+                        Some((id, *save_dir, *file_name))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            // Build total_bytes lookup for DB update after rescue.
+            let total_bytes_map: std::collections::HashMap<&str, i64> = task_map
+                .iter()
+                .map(|(&id, (_, _, _, tb))| (id, *tb))
+                .collect();
+
+            if !rescue_input.is_empty() {
+                let rescued = bt_downloader::rescue_stranded_staging_files(&rescue_input);
+                for (task_id, final_name) in rescued {
+                    let tb = total_bytes_map.get(task_id.as_str()).copied().unwrap_or(0);
+                    if let Err(e) = self
+                        .db
+                        .update_task_file_info(&task_id, &final_name, tb)
+                        .await
+                    {
+                        log_info!(
+                            "[manager] rescue: failed to update file_name for {}: {}",
+                            task_id,
+                            e
+                        );
+                    } else {
+                        log_info!(
+                            "[manager] rescue: updated file_name → '{}' for task {}",
+                            final_name,
+                            task_id
+                        );
+                    }
+                }
+            }
+
+            // Now scan all save_dirs for staging dirs and handle each case.
+            for save_dir in &save_dirs {
+                let dir = std::path::Path::new(save_dir);
+                let entries = match std::fs::read_dir(dir) {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                for entry in entries.filter_map(|e| e.ok()) {
+                    let file_name = entry.file_name();
+                    let name_str = file_name.to_string_lossy();
+                    if !name_str.starts_with(bt_downloader::BT_STAGE_PREFIX) {
+                        continue;
+                    }
+                    let task_id_str = &name_str[bt_downloader::BT_STAGE_PREFIX.len()..];
+                    let path = entry.path();
+
+                    match task_map.get(task_id_str) {
+                        None => {
+                            // Case C: orphan — no matching task in DB.
+                            log_info!(
+                                "[manager] startup cleanup: removing orphan staging dir {}",
+                                path.display()
+                            );
+                            if let Err(e) = std::fs::remove_dir_all(&path) {
+                                log_info!(
+                                    "[manager] startup cleanup: failed to remove orphan staging dir {}: {}",
+                                    path.display(),
+                                    e
+                                );
+                            }
+                        }
+                        Some((3 /* STATUS_COMPLETED */, _, _, _)) => {
+                            // Case A: completed task — staging dir must be gone.
+                            // rescue_stranded_staging_files already moved any
+                            // real data; what remains is only librqbit placeholder
+                            // files (0-byte stubs) or an empty dir.
+                            log_info!(
+                                "[manager] startup cleanup: removing completed-task staging dir {}",
+                                path.display()
+                            );
+                            if let Err(e) = std::fs::remove_dir_all(&path) {
+                                log_info!(
+                                    "[manager] startup cleanup: failed to remove completed staging dir {}: {}",
+                                    path.display(),
+                                    e
+                                );
+                            }
+                        }
+                        Some(_) => {
+                            // Case B: active/paused task — keep staging dir only if it
+                            // contains real (non-zero-byte) data.  An all-zero-byte
+                            // staging dir means librqbit pre-allocated the file but
+                            // the task was paused/cancelled before any real data was
+                            // written (e.g. the same torrent was re-added, creating a
+                            // new task_id and new staging dir, making this one stale).
+                            let has_real_data = std::fs::read_dir(&path)
+                                .map(|rd| {
+                                    rd.filter_map(|e| e.ok())
+                                        .any(|e| e.metadata().map(|m| m.len() > 0).unwrap_or(false))
+                                })
+                                .unwrap_or(false);
+                            if has_real_data {
+                                log_info!(
+                                    "[manager] startup cleanup: keeping staging dir {} (task active/paused, has data)",
+                                    path.display()
+                                );
+                            } else {
+                                log_info!(
+                                    "[manager] startup cleanup: removing empty staging dir {} (task active/paused but no real data)",
+                                    path.display()
+                                );
+                                if let Err(e) = std::fs::remove_dir_all(&path) {
+                                    log_info!(
+                                        "[manager] startup cleanup: failed to remove empty staging dir {}: {}",
+                                        path.display(),
+                                        e
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // Snapshot task info before sending AllTasks (which consumes `tasks`).
         let task_snapshots: Vec<(String, i64)> = tasks
@@ -1193,14 +1383,35 @@ impl DownloadManager {
 
             // Build the torrent source: prefer torrent file bytes if available,
             // otherwise use the URL as a magnet link.
-            let torrent_source = if !torrent_file_bytes.is_empty() {
+            // Capture whether this is a .torrent-file task BEFORE the bytes
+            // are moved into TorrentSource below.
+            let is_torrent_file_task = !torrent_file_bytes.is_empty();
+            let torrent_source = if is_torrent_file_task {
                 TorrentSource::TorrentFileBytes(torrent_file_bytes)
             } else {
                 TorrentSource::Magnet(url)
             };
 
             // Validate and persist user-specified custom name for BT rename.
-            let custom_name = if is_safe_file_name(&file_name) {
+            //
+            // Only treat file_name as a custom rename target when the task
+            // comes from a magnet URL and the user explicitly typed a name.
+            // For .torrent-file tasks the file_name is auto-derived from the
+            // .torrent filename (without the ".torrent" extension) by the Dart
+            // layer — it has no extension and does not represent the user's
+            // intent to rename the download.  Using it as custom_name would
+            // cause the completed file to be saved without its real extension
+            // (e.g. "cachyos-desktop-linux-260308" instead of
+            // "cachyos-desktop-linux-260308.iso").
+            //
+            // Rule: custom_name is only honoured for magnet-URL tasks where
+            // file_name is non-empty and safe.  Torrent-file tasks always
+            // discover their real name from metadata and never rename.
+            let custom_name = if is_torrent_file_task {
+                // Task created from a .torrent file — ignore file_name.
+                String::new()
+            } else if is_safe_file_name(&file_name) {
+                // Magnet task with a user-supplied name.
                 file_name.clone()
             } else {
                 String::new()

@@ -25,6 +25,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::Storage::FileSystem::{
+    FILE_ATTRIBUTE_HIDDEN, GetFileAttributesW, SetFileAttributesW,
+};
+
 use bytes::Bytes;
 use librqbit::{
     AddTorrent, AddTorrentOptions, AddTorrentResponse, ManagedTorrent, PeerConnectionOptions,
@@ -311,6 +316,9 @@ pub struct SharedBtSession {
     /// Stores user's file selection for BT tasks awaiting the dialog.
     /// Key: task_id, Value: selected file indices.
     file_selection_map: Mutex<HashMap<String, Vec<i32>>>,
+    /// Maps librqbit torrent ID → our task_id.
+    /// Used to detect when the same torrent is added by multiple tasks.
+    torrent_ids: Mutex<HashMap<usize, String>>,
 }
 
 impl SharedBtSession {
@@ -384,6 +392,7 @@ impl SharedBtSession {
         let enable_upnp = bt_config.enable_upnp;
 
         let save_dir = default_save_dir.to_owned();
+        let save_dir_for_cleanup = save_dir.clone();
         let session = rt
             .block_on(async {
                 let opts = SessionOptions {
@@ -430,37 +439,78 @@ impl SharedBtSession {
             })
             .map_err(|e| DownloadError::Other(format!("BT session init failed: {e}")))?;
 
-        // Startup cleanup: remove any finished torrents that were
+        // Startup cleanup: remove finished AND paused torrents that were
         // retained in persistence from a previous app session.
         //
-        // Background: since the main fix (pause-on-complete) we no
-        // longer call session.delete() when a torrent finishes, so
-        // completed torrents stay in session.json across restarts.
-        // Without this cleanup they would accumulate indefinitely,
-        // slowing down startup and wasting memory.
+        // Background: shutdown() calls session.pause() on all handles so
+        // torrents are saved as Paused in session.json.  On the next
+        // startup those Paused entries are reloaded by librqbit.  If the
+        // user then starts downloading the same torrent again,
+        // add_torrent returns AlreadyManaged with a Paused handle.
+        // unpause() is called but the progress loop's first iteration
+        // detects stats.state=Paused (the state transition is async) and
+        // exits immediately as Cancelled, so the download never proceeds.
+        //
+        // The fix: remove ALL persisted torrents at startup — both
+        // finished and paused ones.  FluxDown manages its own task state
+        // in SQLite; the librqbit persistence layer is only used for the
+        // piece-bitfield fast-resume (.bitv files), which survive the
+        // session.delete(false) call (only the session.json entry is
+        // removed).  Paused tasks are resumed via do_resume_task →
+        // add_torrent, which re-loads the .bitv bitfield automatically.
         //
         // We only remove them from the librqbit session — the actual
         // downloaded files are left untouched (delete_files=false).
         // User-triggered "delete task + files" goes through the normal
         // delete_task() path which uses delete_files=true.
         {
-            let finished_ids: Vec<usize> = session.with_torrents(|iter| {
-                iter.filter_map(|(id, handle)| {
-                    if handle.stats().finished {
-                        Some(id)
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-            });
-            if !finished_ids.is_empty() {
+            let all_ids: Vec<usize> =
+                session.with_torrents(|iter| iter.map(|(id, _handle)| id).collect());
+            if !all_ids.is_empty() {
                 log_info!(
-                    "[BT] startup cleanup: removing {} finished torrent(s) from persistence",
-                    finished_ids.len()
+                    "[BT] startup cleanup: removing {} torrent(s) from persistence (finished or paused)",
+                    all_ids.len()
                 );
-                for id in finished_ids {
+                for id in all_ids {
                     let _ = rt.block_on(session.delete(id.into(), false));
+                }
+            }
+        }
+
+        // Scan save_dir for staging dirs left behind by the session
+        // restoration above.  Session::new_with_opts() loads session.json
+        // and re-opens persisted torrents, which re-creates / touches their
+        // output files (often as 0-byte stubs) BEFORE our cleanup loop can
+        // call session.delete().  The download_manager's startup cleanup in
+        // load_and_send_all_tasks() runs even earlier — before the BT
+        // session exists — so it cannot catch these recreated dirs either.
+        //
+        // Remove any staging dir whose contents are all 0-byte (no real
+        // downloaded data worth preserving).  Dirs with real data are kept
+        // for resume via do_resume_task → add_torrent.
+        {
+            let save_path = std::path::Path::new(&save_dir_for_cleanup);
+            if let Ok(entries) = std::fs::read_dir(save_path) {
+                for entry in entries.filter_map(|e| e.ok()) {
+                    let name = entry.file_name();
+                    let name_str = name.to_string_lossy();
+                    if !name_str.starts_with(BT_STAGE_PREFIX) {
+                        continue;
+                    }
+                    let path = entry.path();
+                    let has_real_data = std::fs::read_dir(&path)
+                        .map(|rd| {
+                            rd.filter_map(|e| e.ok())
+                                .any(|e| e.metadata().map(|m| m.len() > 0).unwrap_or(false))
+                        })
+                        .unwrap_or(false);
+                    if !has_real_data {
+                        log_info!(
+                            "[BT] startup: removing empty/stub staging dir {}",
+                            path.display()
+                        );
+                        let _ = std::fs::remove_dir_all(&path);
+                    }
                 }
             }
         }
@@ -483,6 +533,7 @@ impl SharedBtSession {
             pending_deletes: Mutex::new(HashMap::new()),
             inflight_adds: AtomicUsize::new(0),
             file_selection_map: Mutex::new(HashMap::new()),
+            torrent_ids: Mutex::new(HashMap::new()),
         })
     }
 
@@ -597,6 +648,8 @@ impl SharedBtSession {
         let handle = self.handles.lock().await.remove(task_id);
         if let Some(handle) = handle {
             let torrent_id = handle.id();
+            // Clean up the torrent_id → task_id mapping.
+            self.unregister_torrent_id(torrent_id).await;
             if let Err(e) = self.session.delete(torrent_id.into(), delete_files).await {
                 log_info!(
                     "[BT] task={} session.delete error: {}",
@@ -646,6 +699,24 @@ impl SharedBtSession {
     pub async fn take_file_selection(&self, task_id: &str) -> Option<Vec<i32>> {
         let mut map = self.file_selection_map.lock().await;
         map.remove(task_id)
+    }
+
+    /// Record that a librqbit torrent_id is now managed by the given task_id.
+    pub async fn register_torrent_id(&self, torrent_id: usize, task_id: &str) {
+        self.torrent_ids
+            .lock()
+            .await
+            .insert(torrent_id, task_id.to_string());
+    }
+
+    /// Remove the torrent_id mapping when a task is deleted.
+    pub async fn unregister_torrent_id(&self, torrent_id: usize) {
+        self.torrent_ids.lock().await.remove(&torrent_id);
+    }
+
+    /// Look up which task_id owns a given torrent_id.
+    pub async fn task_for_torrent(&self, torrent_id: usize) -> Option<String> {
+        self.torrent_ids.lock().await.get(&torrent_id).cloned()
     }
 
     fn increment_inflight_add(&self) {
@@ -771,6 +842,8 @@ pub async fn run_bt_download(params: BtDownloadParams) -> Result<(), DownloadErr
     let torrent_source = params.torrent_source.clone();
     let save_dir = params.save_dir.clone();
     let tid = task_id.clone();
+    let save_dir_for_cleanup = save_dir.clone();
+    let tid_for_cleanup = tid.clone();
     let session = params.session.clone();
     let bt_runtime = params.bt_runtime.clone();
     let shared_bt = params.shared_bt.clone();
@@ -803,9 +876,35 @@ pub async fn run_bt_download(params: BtDownloadParams) -> Result<(), DownloadErr
 
     cancel_watcher.abort();
 
+    // Clean up pre-created staging dir if it's empty or contains only
+    // zero-byte files (librqbit may pre-allocate stubs before detecting
+    // AlreadyManaged or before any real data is written).
+    let cleanup_stage = || {
+        let stage = bt_stage_dir(&save_dir_for_cleanup, &tid_for_cleanup);
+        if !stage.exists() {
+            return;
+        }
+        let has_real_data = std::fs::read_dir(&stage)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .any(|e| e.metadata().map(|m| m.len() > 0).unwrap_or(false))
+            })
+            .unwrap_or(false);
+        if !has_real_data {
+            log_info!(
+                "[BT] task={} cleaning up empty staging dir after error/cancel",
+                short_id(&tid_for_cleanup)
+            );
+            let _ = std::fs::remove_dir_all(&stage);
+        }
+    };
+
     match result {
         Ok(Ok(())) => Ok(()),
-        Ok(Err(e)) => Err(e),
+        Ok(Err(e)) => {
+            cleanup_stage();
+            Err(e)
+        }
         // JoinError has two causes:
         //   1. The spawned task panicked → treat as error (existing behaviour).
         //   2. The BT runtime was shut down (e.g. maybe_release_bt_session called
@@ -813,6 +912,7 @@ pub async fn run_bt_download(params: BtDownloadParams) -> Result<(), DownloadErr
         //      In that case cancelled is already true, so treat it as Cancelled to
         //      prevent the task from being marked as failed/error in the DB.
         Err(join_err) => {
+            cleanup_stage();
             if cancelled.load(Ordering::SeqCst) {
                 log_info!(
                     "[BT] task={} JoinError while cancelled (runtime shutdown during pause) — treating as Cancelled",
@@ -871,13 +971,206 @@ const STATUS_ERROR: i32 = 4;
 /// concurrent tasks with identical torrent names never collide on disk.
 /// The directory is removed after the file/folder is moved to its final
 /// location (or on task deletion).
-const BT_STAGE_PREFIX: &str = ".bt_stage_";
+pub const BT_STAGE_PREFIX: &str = ".bt_stage_";
 
 /// Build the staging directory path for a BT task.
 ///
 /// `save_dir/.bt_stage_<task_id>/`
 pub fn bt_stage_dir(save_dir: &str, task_id: &str) -> PathBuf {
     PathBuf::from(save_dir).join(format!("{}{}", BT_STAGE_PREFIX, task_id))
+}
+
+/// Mark a path as hidden on Windows using `SetFileAttributesW`.
+///
+/// On non-Windows platforms this is a no-op — the leading `.` in the directory
+/// name is already the POSIX convention for hidden files.
+///
+/// Failures are silently ignored: a non-hidden staging directory is merely a
+/// cosmetic nuisance; it does not affect correctness.
+fn set_hidden(path: &Path) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        // Encode path as a NUL-terminated wide string.
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0u16))
+            .collect();
+        // Safety: `wide` is a valid NUL-terminated UTF-16 path.
+        unsafe {
+            let attrs = GetFileAttributesW(wide.as_ptr());
+            // INVALID_FILE_ATTRIBUTES == 0xFFFFFFFF
+            if attrs != 0xFFFF_FFFF {
+                let _ = SetFileAttributesW(wide.as_ptr(), attrs | FILE_ATTRIBUTE_HIDDEN);
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = path; // no-op
+    }
+}
+
+/// At startup, attempt to finish any BT tasks that completed downloading but
+/// whose staging-directory move was interrupted (e.g. the app was force-killed
+/// between `stats.finished` being detected and the `move_path` call completing).
+///
+/// For each task in `completed_bt_tasks` we check whether a staging directory
+/// still exists at `save_dir/.bt_stage_<task_id>/`.  If it does, we perform
+/// the same move logic as `bt_download_inner` Phase 5:
+///
+/// 1. Look for an entry inside the staging dir whose name matches
+///    `current_file_name` (written to DB during Phase 3 as `resolved_name`).
+///    If not found, fall back to moving **every** non-hidden entry
+///    (mirrors the "staging item not found" fallback in Phase 5).
+/// 2. Move the matched item to `save_dir/<dedup_name>`.
+/// 3. Remove the now-empty staging dir.
+/// 4. Return a list of `(task_id, final_name)` pairs so the caller can update
+///    the DB with the correct `file_name`.
+///
+/// Uses synchronous I/O — called once at startup before any BT session is
+/// active, so there is no concurrency risk.
+pub fn rescue_stranded_staging_files(
+    completed_bt_tasks: &[(&str, &str, &str)], // (task_id, save_dir, current_file_name)
+) -> Vec<(String, String)> {
+    let mut updates: Vec<(String, String)> = Vec::new();
+
+    for &(task_id, save_dir, current_file_name) in completed_bt_tasks {
+        let stage_dir = bt_stage_dir(save_dir, task_id);
+        if !stage_dir.exists() {
+            continue;
+        }
+
+        log_info!(
+            "[BT] rescue: task={} staging dir still present at '{}', attempting recovery move",
+            &task_id[..task_id.len().min(8)],
+            stage_dir.display()
+        );
+
+        let save_path = Path::new(save_dir);
+
+        // Collect non-hidden entries from the staging dir.
+        let entries: Vec<std::fs::DirEntry> = match std::fs::read_dir(&stage_dir) {
+            Ok(rd) => rd
+                .filter_map(|e| e.ok())
+                .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+                .collect(),
+            Err(e) => {
+                log_info!(
+                    "[BT] rescue: task={} cannot read staging dir: {}",
+                    &task_id[..task_id.len().min(8)],
+                    e
+                );
+                continue;
+            }
+        };
+
+        if entries.is_empty() {
+            // Staging dir is empty (or only hidden files) — remove it.
+            let _ = std::fs::remove_dir_all(&stage_dir);
+            log_info!(
+                "[BT] rescue: task={} staging dir was empty, removed",
+                &task_id[..task_id.len().min(8)]
+            );
+            continue;
+        }
+
+        // ------------------------------------------------------------------
+        // Fast path: an entry whose name exactly matches current_file_name
+        // (= resolved_name written to DB in Phase 3 / Phase 3.5).
+        // This is the normal case: single-file torrent or a multi-file
+        // torrent whose top-level directory name equals the torrent name.
+        // Mirrors the `stage_item.exists()` branch in bt_download_inner.
+        // ------------------------------------------------------------------
+        let preferred = entries
+            .iter()
+            .find(|e| e.file_name().to_string_lossy() == current_file_name);
+
+        if let Some(entry) = preferred {
+            let child_name = entry.file_name();
+            let child_name_str = child_name.to_string_lossy();
+            let final_name = dedup_name_in_dir(save_path, &child_name_str);
+            let dst = save_path.join(&final_name);
+
+            match move_path(&entry.path(), &dst) {
+                Ok(()) => {
+                    log_info!(
+                        "[BT] rescue: task={} moved '{}' → '{}' (recovery complete)",
+                        &task_id[..task_id.len().min(8)],
+                        entry.path().display(),
+                        dst.display()
+                    );
+                    // Remove staging dir; may still contain .pad / hidden files.
+                    let _ = std::fs::remove_dir_all(&stage_dir);
+                    updates.push((task_id.to_string(), final_name));
+                }
+                Err(e) => {
+                    log_info!(
+                        "[BT] rescue: task={} failed to move '{}': {}",
+                        &task_id[..task_id.len().min(8)],
+                        entry.path().display(),
+                        e
+                    );
+                    // Leave staging dir in place for manual recovery.
+                }
+            }
+            continue;
+        }
+
+        // ------------------------------------------------------------------
+        // Fallback path: no entry matched current_file_name.
+        // This mirrors the `stage_dir.exists()` fallback in bt_download_inner:
+        // move every non-hidden child individually and report the first
+        // successfully moved item as the new file_name.
+        // ------------------------------------------------------------------
+        log_info!(
+            "[BT] rescue: task={} expected item '{}' not found in staging dir; \
+             moving all children",
+            &task_id[..task_id.len().min(8)],
+            current_file_name
+        );
+
+        let mut first_moved_name: Option<String> = None;
+        for entry in &entries {
+            let child_name = entry.file_name();
+            let child_name_str = child_name.to_string_lossy();
+            let final_child_name = dedup_name_in_dir(save_path, &child_name_str);
+            let dst = save_path.join(&final_child_name);
+
+            match move_path(&entry.path(), &dst) {
+                Ok(()) => {
+                    log_info!(
+                        "[BT] rescue: task={} moved child '{}' → '{}'",
+                        &task_id[..task_id.len().min(8)],
+                        entry.path().display(),
+                        dst.display()
+                    );
+                    if first_moved_name.is_none() {
+                        first_moved_name = Some(final_child_name);
+                    }
+                }
+                Err(e) => {
+                    log_info!(
+                        "[BT] rescue: task={} failed to move child '{}': {}",
+                        &task_id[..task_id.len().min(8)],
+                        entry.path().display(),
+                        e
+                    );
+                }
+            }
+        }
+
+        // Remove staging dir regardless — any failed children are lost;
+        // the user can re-download if needed.
+        let _ = std::fs::remove_dir_all(&stage_dir);
+
+        if let Some(name) = first_moved_name {
+            updates.push((task_id.to_string(), name));
+        }
+    }
+
+    updates
 }
 
 /// Deduplicate a file or directory name inside `dir`.
@@ -1249,6 +1542,19 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
         // librqbit will write to  save_dir/.bt_stage_<task_id>/<resolved_name>
         // and we move the result to the final deduplicated path after download.
         let stage_dir = bt_stage_dir(&save_dir, &task_id);
+        // Create the staging directory now (before librqbit does) so we can
+        // immediately mark it hidden.  librqbit uses `overwrite: true` and
+        // will reuse the directory if it already exists.
+        if let Err(e) = std::fs::create_dir_all(&stage_dir) {
+            log_info!(
+                "[BT] task={} failed to pre-create staging dir '{}': {}",
+                short_id(&task_id),
+                stage_dir.display(),
+                e
+            );
+        } else {
+            set_hidden(&stage_dir);
+        }
         let stage_dir_str = stage_dir.to_string_lossy().into_owned();
         let add_opts = AddTorrentOptions {
             overwrite: true,
@@ -1331,15 +1637,40 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                     let h = match resp {
                         AddTorrentResponse::Added(_id, handle) => {
                             log_info!("[BT] task={} torrent added, id={}", short_id(&task_id), _id);
+                            shared_bt.register_torrent_id(_id, &task_id).await;
                             handle
                         }
-                        AddTorrentResponse::AlreadyManaged(_id, handle) => {
-                            log_info!("[BT] task={} torrent already in session, id={}", short_id(&task_id), _id);
-                            // Unpause if it was paused from a previous session
-                            if handle.is_paused() {
-                                let _ = session.unpause(&handle).await;
-                            }
-                            handle
+                        AddTorrentResponse::AlreadyManaged(_id, _handle) => {
+                            let owner = shared_bt
+                                .task_for_torrent(_id)
+                                .await
+                                .unwrap_or_else(|| "unknown".to_string());
+                            log_info!(
+                                "[BT] task={} torrent already managed by task={} (id={}), rejecting duplicate",
+                                short_id(&task_id),
+                                short_id(&owner),
+                                _id
+                            );
+                            // Clean up the pre-created staging dir (it's empty/useless).
+                            let _ = std::fs::remove_dir_all(&stage_dir);
+
+                            let msg = format!(
+                                "This torrent is already being downloaded by another task ({})",
+                                short_id(&owner)
+                            );
+                            let _ = db.update_task_status(&task_id, STATUS_ERROR, &msg).await;
+                            let _ = progress_tx
+                                .send(ProgressUpdate {
+                                    task_id: task_id.clone(),
+                                    downloaded_bytes: 0,
+                                    total_bytes: 0,
+                                    status: STATUS_ERROR,
+                                    error_message: msg.clone(),
+                                    file_name: String::new(),
+                                    segment_details: None,
+                                })
+                                .await;
+                            return Err(DownloadError::Other(msg));
                         }
                         AddTorrentResponse::ListOnly(_) => {
                             return Err(DownloadError::Other(
@@ -1711,6 +2042,21 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
         }
 
         let stats = handle.stats();
+        // Guard: if this is the very first iteration of the loop (i.e. the
+        // torrent just came back from add_torrent / AlreadyManaged + unpause)
+        // and librqbit hasn't transitioned to Live yet, spin-wait up to 1s
+        // instead of treating the transient Paused state as a cancellation.
+        // This closes the race window where unpause() is called but the
+        // state machine hasn't updated before we read stats below.
+        let is_paused_state = matches!(stats.state, librqbit::TorrentStatsState::Paused);
+        if is_paused_state && !cancelled.load(Ordering::SeqCst) {
+            // Only spin on the very first poll (before any progress has been
+            // reported) to avoid masking a genuine post-pause state.
+            if stats.progress_bytes == 0 && stats.total_bytes > 0 {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                continue; // re-check stats on next iteration
+            }
+        }
         let checked_progress = stats.progress_bytes as i64;
         let total = if stats.total_bytes > 0 {
             stats.total_bytes as i64
@@ -1744,7 +2090,6 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
         // cancelled=false while the session is already shutting down.  The additional
         // `stats.state != Paused` guard eliminates that window: a torrent that
         // librqbit has already placed in the Paused state cannot be in error.
-        let is_paused_state = matches!(stats.state, librqbit::TorrentStatsState::Paused);
         if let Some(ref err) = stats.error {
             // If we are already cancelled (pause/cancel in progress), or the
             // torrent state is Paused, do not treat this as a hard error —
@@ -1831,9 +2176,6 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
 
                 match move_path(&stage_item, &final_path) {
                     Ok(()) => {
-                        // Remove now-empty staging directory (best-effort).
-                        let _ = std::fs::remove_dir_all(&stage_dir);
-
                         if final_name != resolved_name {
                             log_info!(
                                 "[BT] task={} file_name updated '{}' → '{}' (dedup)",
@@ -1892,7 +2234,6 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                         }
                     }
                 }
-                let _ = std::fs::remove_dir_all(&stage_dir);
                 // If the user specified a custom name, rename the moved item.
                 if !custom_name.is_empty() && first_child_name != custom_name {
                     let src = save_path.join(&first_child_name);
@@ -1938,6 +2279,50 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
             // removed the session entry; that left no clean path for file
             // deletion — only an unreliable filesystem-path fallback.
             let _ = shared_bt.pause_task(&task_id).await;
+
+            // Clean up the staging directory AFTER pause_task() so that
+            // librqbit has released all file handles it held inside the
+            // staging dir.  On Windows, open handles prevent deletion
+            // (ERROR_SHARING_VIOLATION), which is why remove_dir_all called
+            // before pause would silently fail and leave the staging dir
+            // behind.  We retry a few times with a short delay to handle
+            // the case where the runtime thread hasn't fully flushed yet.
+            let stage_dir_for_cleanup = bt_stage_dir(&save_dir, &task_id);
+            if stage_dir_for_cleanup.exists() {
+                let mut removed = false;
+                for attempt in 0u8..4 {
+                    if attempt > 0 {
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                    }
+                    match tokio::fs::remove_dir_all(&stage_dir_for_cleanup).await {
+                        Ok(()) => {
+                            log_info!(
+                                "[BT] task={} staging dir removed after pause (attempt {})",
+                                short_id(&task_id),
+                                attempt + 1
+                            );
+                            removed = true;
+                            break;
+                        }
+                        Err(e) => {
+                            log_info!(
+                                "[BT] task={} staging dir remove attempt {} failed: {}",
+                                short_id(&task_id),
+                                attempt + 1,
+                                e
+                            );
+                        }
+                    }
+                }
+                if !removed {
+                    log_info!(
+                        "[BT] task={} staging dir '{}' could not be removed — left for startup cleanup",
+                        short_id(&task_id),
+                        stage_dir_for_cleanup.display()
+                    );
+                }
+            }
+
             return Ok(());
         }
 

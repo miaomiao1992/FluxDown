@@ -1,0 +1,13 @@
+{
+  "languages": {
+    "TypeScript": {
+      "language_servers": ["typescript-language-server", "!eslint"]
+    },
+    "TSX": {
+      "language_servers": ["typescript-language-server", "!eslint"]
+    },
+    "JavaScript": {
+      "language_servers": ["typescript-language-server", "!eslint"]
+    }
+  }
+}
