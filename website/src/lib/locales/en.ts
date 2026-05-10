@@ -283,6 +283,7 @@ const en = {
   "ext.feat3.desc":
     "Filter by file extension, domain whitelist/blacklist, and minimum file size threshold",
   "ext.addToChrome": "Add to Chrome",
+  "ext.addToEdge": "Add to Edge",
   "ext.connected": "Connected",
   "ext.paused": "Paused",
   "ext.today": "Today",
@@ -313,9 +314,10 @@ const en = {
   "dl.portablePkg": "Portable",
   "dl.extensionTitle": "Browser Extension",
   "dl.extensionDesc":
-    "Intercept browser downloads and send them to FluxDown. Supports Chrome and Firefox. Both extensions are now officially listed on their stores.",
+    "Intercept browser downloads and send them to FluxDown. Supports Chrome, Edge and Firefox. All extensions are officially listed on their stores.",
   "dl.extensionFirefox": "Firefox Add-ons Store",
   "dl.extensionChromeStore": "Chrome Web Store",
+  "dl.extensionEdgeStore": "Edge Add-ons",
   "dl.extensionOffline": "Chrome Offline",
   "dl.extensionOtherNote":
     "For Chrome, Edge, Brave and other Chromium-based browsers",
