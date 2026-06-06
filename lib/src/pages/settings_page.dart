@@ -1592,6 +1592,13 @@ class _BtContent extends StatelessWidget {
         return Column(
           children: [
             _SettingCard(
+              label: LocaleScope.of(context).btListenPort,
+              description: LocaleScope.of(context).btListenPortDesc,
+              vertical: true,
+              child: _BtPortRangeEditor(settingsProvider: settingsProvider),
+            ),
+            const SizedBox(height: 10),
+            _SettingCard(
               label: LocaleScope.of(context).btTrackerList,
               description: LocaleScope.of(context).btTrackerListDesc,
               vertical: true,
@@ -2959,6 +2966,116 @@ class _LocalServerCardState extends State<_LocalServerCard> {
 // ─────────────────────────────────────────────
 // BT 设置子组件
 // ─────────────────────────────────────────────
+
+/// BT 监听端口范围编辑器（起始端口 / 结束端口）
+class _BtPortRangeEditor extends StatefulWidget {
+  final SettingsProvider settingsProvider;
+
+  const _BtPortRangeEditor({required this.settingsProvider});
+
+  @override
+  State<_BtPortRangeEditor> createState() => _BtPortRangeEditorState();
+}
+
+class _BtPortRangeEditorState extends State<_BtPortRangeEditor> {
+  late TextEditingController _startController;
+  late TextEditingController _endController;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    final sp = widget.settingsProvider;
+    _startController = TextEditingController(text: '${sp.btPortStart}');
+    _endController = TextEditingController(text: '${sp.btPortEnd}');
+  }
+
+  @override
+  void didUpdateWidget(_BtPortRangeEditor oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final sp = widget.settingsProvider;
+    final start = int.tryParse(_startController.text);
+    final end = int.tryParse(_endController.text);
+    if (sp.btPortStart != start) {
+      _startController.text = '${sp.btPortStart}';
+    }
+    if (sp.btPortEnd != end) {
+      _endController.text = '${sp.btPortEnd}';
+    }
+  }
+
+  @override
+  void dispose() {
+    _startController.dispose();
+    _endController.dispose();
+    super.dispose();
+  }
+
+  bool _isValid(int start, int end) {
+    return start >= 1024 && start <= 65535 && end >= 1024 && end <= 65535 && start <= end;
+  }
+
+  void _tryCommit() {
+    final start = int.tryParse(_startController.text);
+    final end = int.tryParse(_endController.text);
+    if (start == null || end == null || !_isValid(start, end)) {
+      setState(() => _error = LocaleScope.of(context).btPortInvalid);
+      return;
+    }
+    setState(() => _error = null);
+    widget.settingsProvider.setBtPortStart(start);
+    widget.settingsProvider.setBtPortEnd(end);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = AppColors.of(context);
+    final s = LocaleScope.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            SizedBox(
+              width: 110,
+              child: ShadInput(
+                controller: _startController,
+                placeholder: Text(s.btListenPortStart),
+                keyboardType: TextInputType.number,
+                onSubmitted: (_) => _tryCommit(),
+                onChanged: (_) => _tryCommit(),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: Text(
+                '–',
+                style: TextStyle(fontSize: 14, color: c.textMuted),
+              ),
+            ),
+            SizedBox(
+              width: 110,
+              child: ShadInput(
+                controller: _endController,
+                placeholder: Text(s.btListenPortEnd),
+                keyboardType: TextInputType.number,
+                onSubmitted: (_) => _tryCommit(),
+                onChanged: (_) => _tryCommit(),
+              ),
+            ),
+          ],
+        ),
+        if (_error != null) ...[
+          const SizedBox(height: 6),
+          Text(
+            _error!,
+            style: TextStyle(fontSize: 11.5, color: c.statusError),
+          ),
+        ],
+      ],
+    );
+  }
+}
 
 /// BT Tracker 列表编辑器
 ///
