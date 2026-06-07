@@ -23,8 +23,13 @@
 //!    CORS 预检（OPTIONS），而本服务**不返回** `Access-Control-Allow-Origin`，
 //!    预检失败 → 浏览器拦截真实请求。油猴 `GM_xmlhttpRequest` 不受 CORS 约束、
 //!    可自由设置该头，故脚本正常工作、恶意网页被挡。
-//! 3. **JSON 内容类型门禁**：aria2 兼容端点 `/jsonrpc` 要求
-//!    `Content-Type: application/json`，同样迫使跨域请求走预检被拦截。
+//! 3. **JSON-RPC 合法性门禁**：aria2 兼容端点 `/jsonrpc` 不校验 `Content-Type`
+//!    （与真实 aria2 行为一致），改以「请求体能否解析为合法 JSON-RPC」为准入门槛。
+//!    放宽 `Content-Type` 是为兼容广泛存在的 aria2 风格脚本（如「网盘直链下载助手」
+//!    panlinker），它们经 `GM_xmlhttpRequest` 发送但默认不带 `application/json` 头。
+//!    代价是恶意网页可用 `text/plain` 简单请求绕过 CORS 预检直打 `/jsonrpc`，
+//!    故 `/jsonrpc` 的纵深防御依赖第 4、5 条（可选 token + 最终确认弹框）；
+//!    而变更类端点 `/download`、`/download/batch` 仍由第 2 条的自定义头门禁保护。
 //! 4. **可选 token**（`local_server_token` 非空时启用）：请求需带匹配的
 //!    `X-FluxDown-Token` 头，常量时间比较，作纵深防御。
 //! 5. **最终安全网**：所有下载都会在 FluxDown 中弹出确认框，杜绝静默下载。
@@ -546,26 +551,16 @@ fn str_field(v: &Value, key: &str) -> String {
 /// 同时支持**单个请求对象**与**顶层 JSON 数组批量**（gofile-enhanced 等脚本
 /// 一次 POST 多个 JSON-RPC 对象的实际行为）。
 ///
-/// 安全：强制 `Content-Type: application/json`（迫使跨域网页走预检被拦截），
-/// 并支持 aria2 约定的 `token:xxx`（params[0]）或 `X-FluxDown-Token` 头鉴权。
+/// 安全：不校验 `Content-Type`（与真实 aria2 一致，兼容不带 `application/json` 头的
+/// aria2 风格脚本），改以请求体能否解析为合法 JSON-RPC 为准入门槛；并支持 aria2
+/// 约定的 `token:xxx`（params[0]）或 `X-FluxDown-Token` 头鉴权。详见模块级「安全模型」。
 async fn handle_jsonrpc(
     stream: &mut TcpStream,
     tx: &mpsc::Sender<DownloadRequest>,
     config: &HttpTakeoverConfig,
     req: &HttpRequest,
 ) {
-    // 内容类型门禁。
-    let ct = req
-        .headers
-        .get("content-type")
-        .map(|s| s.to_ascii_lowercase())
-        .unwrap_or_default();
-    if !ct.contains("application/json") {
-        let err = rpc_err(&Value::Null, -32600, "Content-Type must be application/json");
-        write_response(stream, 200, "OK", &err.to_string()).await;
-        return;
-    }
-
+    // 准入门槛：请求体须能解析为合法 JSON（解析失败即非 JSON-RPC 客户端，拒绝）。
     let parsed: Value = match serde_json::from_slice(&req.body) {
         Ok(v) => v,
         Err(e) => {
@@ -1172,14 +1167,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn integration_jsonrpc_requires_json_content_type() {
+    async fn integration_jsonrpc_accepts_non_json_content_type() {
+        // 兼容性回归：panlinker 等 aria2 风格脚本经 GM_xmlhttpRequest 发送时
+        // 默认不带 `application/json` 头（常为 text/plain）。/jsonrpc 不应据此拒绝，
+        // 只要请求体是合法 JSON-RPC 即正常处理（与真实 aria2 行为一致）。
+        let (addr, mut rx) = start_test_server("").await;
+        let body = r#"{"jsonrpc":"2.0","id":"1","method":"aria2.addUri","params":["token:",["https://a.com/v.mp4"],{"out":"v.mp4"}]}"#;
+        let req = post("/jsonrpc", "Content-Type: text/plain;charset=UTF-8\r\n", body);
+        let resp = raw_request(&addr, &req).await;
+        assert!(resp.contains("200 OK"), "resp={resp}");
+        assert!(resp.contains("\"result\""), "resp={resp}");
+        let dl = rx.recv().await.unwrap();
+        assert_eq!(dl.url, "https://a.com/v.mp4");
+    }
+
+    #[tokio::test]
+    async fn integration_jsonrpc_rejects_non_json_body() {
+        // 准入门槛仍在：非 JSON 请求体应被拒绝（-32700 解析错误）。
         let (addr, _rx) = start_test_server("").await;
-        let body = r#"{"jsonrpc":"2.0","id":"1","method":"aria2.getVersion"}"#;
-        // text/plain → 内容类型门禁拒绝
-        let req = post("/jsonrpc", "Content-Type: text/plain\r\n", body);
+        let req = post("/jsonrpc", "Content-Type: text/plain\r\n", "not json at all");
         let resp = raw_request(&addr, &req).await;
         assert!(resp.contains("\"error\""), "resp={resp}");
-        assert!(resp.contains("application/json"));
+        assert!(resp.contains("-32700"), "resp={resp}");
     }
 
     #[tokio::test]

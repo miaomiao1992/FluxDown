@@ -323,6 +323,18 @@ pub async fn run_coordinated_download(
             "coordinator: invalid initial_segment_count={initial_segment_count} for task {task_id}"
         )));
     }
+    // 段数钳制：保证每个新建分段至少覆盖 1 字节。build_fresh_segments 用
+    // chunk = total_bytes / count；当 count > total_bytes 时 chunk=0，会生成大量
+    // start>end 的空段，worker 据此发出非法 Range（如 bytes=0--1），分段永远无法
+    // 被标记 Completed，整个下载**死循环**（实测：1 字节文件配 32 段必 hang）。
+    // 生产路径通常在上游钳制，但此处作为 coordinator 自身的防御兜底（其防御检查
+    // 此前只挡 total_bytes<=0 / count<1，漏了 count>total_bytes 这条）。
+    let initial_segment_count = if (initial_segment_count as i64) > total_bytes {
+        // total_bytes 在 count>total_bytes 时必然很小，可安全转 i32。
+        total_bytes as i32
+    } else {
+        initial_segment_count
+    };
 
     // ----- 1. Build initial segment map from DB or fresh calculation ---------
     let existing = db.load_segments(task_id).await?;
@@ -1869,8 +1881,24 @@ async fn do_segment(
     // 多段下载始终用 GET——上游 resolve_file_info 已确保 spec.is_get_like()，
     // 此处显式传入 GET 以规避：（1）调用方误传 non-GET spec；（2）spec.method
     // 是 HEAD（HEAD 不携带 body，没有意义）。
-    let req = crate::downloader::build_request(client, url, reqwest::Method::GET, spec)
+    let mut req = crate::downloader::build_request(client, url, reqwest::Method::GET, spec)
         .header("Range", range);
+    // If-Range：把"文件是否自 probe 起变化"的判定交给服务器。validator 一致 →
+    // 返回 206（正常分段）；不一致 → 返回 200 全量 → 下方 != 206 守卫触发
+    // RangeNotSupported，coordinator 取消并回退单流（download_single 的 If-Range
+    // 会再判一次），从而**即使 CDN 在 206 上剥离了 ETag/Last-Modified**也能阻止
+    // 新旧版本静默拼接（BUG-COORD-XVERSION-NO-CONDITIONAL）。下方逐段 ETag 比对
+    // 作为第二道防线保留（应对服务器忽略 If-Range 的情形）。
+    let validator = if !expected_etag.is_empty() {
+        Some(expected_etag.to_string())
+    } else if !expected_last_modified.is_empty() {
+        Some(expected_last_modified.to_string())
+    } else {
+        None
+    };
+    if let Some(v) = validator {
+        req = req.header("If-Range", v);
+    }
     let resp = req.send().await?.error_for_status()?;
 
     // --- Range support verification ----------------------------------------
@@ -1950,6 +1978,15 @@ async fn do_segment(
             seg_idx, enc
         )));
     }
+    // 未知但存在的 Content-Encoding（如 compress）：detect 返回 None 会被当 identity
+    // 原样拼接 → 损坏。同样回退单流（BUG-HTTP-UNKNOWN-ENCODING-RAW 的多段对应面）。
+    if let Some(unknown) = crate::downloader::unsupported_content_encoding(resp.headers()) {
+        record_single_conn_domain(url);
+        return Err(DownloadError::Other(format!(
+            "segment {seg_idx}: server returned unsupported Content-Encoding '{unknown}' on a \
+             Range response; cannot assemble byte ranges. Please retry in single-stream mode."
+        )));
+    }
 
     // 注：旧版本会在 segment 0 响应中提取 Content-Disposition 的"更好文件名"
     // 写入 DB 并通知 Dart UI，run_download_inner 末尾再据此 dedup + 重定向
@@ -1993,6 +2030,9 @@ async fn do_segment(
         tokio::select! {
             _ = cancel.cancelled() => {
                 file.flush().await?;
+                // best-effort fdatasync：cancel 落库的偏移会被 resume 信任，掉电
+                // 后页缓存丢失会致空洞。失败不掩盖 Cancelled（见 BUG-COORD-FSYNC）。
+                let _ = file.get_ref().sync_data().await;
                 update_seg_state(seg_states, seg_idx, seg_downloaded);
                 let _ = db.update_segment_progress(task_id, seg_idx, seg_downloaded).await;
                 return Err(DownloadError::Cancelled);
@@ -2006,6 +2046,7 @@ async fn do_segment(
                     Ok(c) => c,
                     Err(_) => {
                         file.flush().await?;
+                        let _ = file.get_ref().sync_data().await;
                         update_seg_state(seg_states, seg_idx, seg_downloaded);
                         let _ = db.update_segment_progress(
                             task_id, seg_idx, seg_downloaded,
@@ -2090,6 +2131,13 @@ async fn do_segment(
 
                         // --- DB persistence (periodic) ---
                         if last_db_save.elapsed().as_secs() >= DB_SAVE_INTERVAL_SECS {
+                            // 落库前 flush + fdatasync：DB 记录的偏移是 resume 的信任来源，
+                            // 若只 flush（用户态→页缓存）就落库，掉电后该区间在盘上仍是
+                            // 预分配的 0，resume 却据 DB 跳过 → 永久空洞且能骗过完整性
+                            // 检查（BUG-COORD-FSYNC）。fdatasync 只在 DB_SAVE_INTERVAL(3s)
+                            // 周期触发，开销有界；保证 "DB 偏移 <= 已持久化字节" 不变式。
+                            file.flush().await?;
+                            file.get_ref().sync_data().await?;
                             let _ = db
                                 .update_segment_progress(task_id, seg_idx, seg_downloaded)
                                 .await;
@@ -2098,6 +2146,7 @@ async fn do_segment(
                     }
                     Some(Err(e)) => {
                         file.flush().await?;
+                        let _ = file.get_ref().sync_data().await;
                         update_seg_state(seg_states, seg_idx, seg_downloaded);
                         let _ = db
                             .update_segment_progress(task_id, seg_idx, seg_downloaded)
@@ -2111,6 +2160,12 @@ async fn do_segment(
     }
 
     file.flush().await?;
+    // 段写入完成后、落库标记 Completed 前做 fdatasync，确保数据真正落盘。
+    // coordinator 把 Completed 段视为永久完成、resume 时绝不重取——若此处不
+    // 持久化，崩溃/掉电后会留下 "DB 完成但磁盘为 0" 的空洞且通过完整性检查
+    // （BUG-COORD-FSYNC）。放在下方 fadvise(DONTNEED) 之前，使已落盘的干净页
+    // 可被安全丢弃。同时覆盖紧随其后的截断分支落库（2164 行附近）。
+    file.get_ref().sync_data().await?;
 
     // --- Truncation / short-read detection ---------------------------------
     // 若循环并非因抵达段边界而退出（boundary_reached == false），且未被取消，

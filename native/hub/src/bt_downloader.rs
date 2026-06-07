@@ -1284,7 +1284,14 @@ fn dedup_name_in_dir(dir: &Path, name: &str) -> String {
             return new_name;
         }
     }
-    name.to_string()
+    // 极端兜底:1..=9999 个编号变体全被占用时,此前返回**原名不变**,调用点
+    // (容器 / 单文件分支)会直接拿它当 dst,move_path 静默覆盖已存在文件丢数据。
+    // 改用 UUID 后缀保证唯一,杜绝覆盖。(BUG-BT-DEDUP-FALLBACK-OVERWRITE)
+    let uniq = uuid::Uuid::new_v4();
+    match ext {
+        Some(e) => format!("{} ({}).{}", stem, uniq, e),
+        None => format!("{} ({})", stem, uniq),
+    }
 }
 
 /// Compute the layout for moving downloaded files from staging to save_dir.
@@ -1319,6 +1326,28 @@ fn compute_completion_layout(
     custom_name: &str,
 ) -> Option<(Vec<(PathBuf, PathBuf)>, String)> {
     if selected_paths.is_empty() {
+        return None;
+    }
+
+    // 路径穿越防护:`selected_paths` 源自 torrent 元数据(file_infos[i].
+    // relative_filename),恶意种子可塞入 `..` / 绝对路径 / 盘符前缀,使
+    // `stage_dir.join(rel)` 逃出 staging 目录(读到任意位置文件)或破坏 dst 归属。
+    // 任一选中路径不安全即整体拒绝(返回 None → 调用方标 STATUS_ERROR),决不
+    // 移动可疑数据。空字节无法出现在 String 派生的 Path 中,这里按组件做词法校验
+    // (不做 canonicalize 以避免额外 I/O 与文件不存在时的误报)。
+    // (BUG-BT-PATH-TRAVERSAL)
+    let path_is_safe = |rel: &Path| -> bool {
+        use std::path::Component;
+        if rel.as_os_str().is_empty() || rel.is_absolute() {
+            return false;
+        }
+        rel.components().all(|c| matches!(c, Component::Normal(_)))
+    };
+    if let Some(bad) = selected_paths.iter().find(|p| !path_is_safe(p)) {
+        log_info!(
+            "[BT] completion: rejecting unsafe selected path '{}' (path traversal guard)",
+            bad.display(),
+        );
         return None;
     }
 
@@ -1578,7 +1607,12 @@ fn build_piece_scatter_segments(
     total_pieces: u32,
     downloaded_pieces: u64,
 ) -> Vec<SegmentProgressInfo> {
-    let n = BT_VIRTUAL_SEGMENTS;
+    // 虚拟段数钳制到 total_bytes:当 total_bytes ∈ 1..16 时,
+    // chunk = total_bytes / 16 == 0,非末段 end = (i+1)*chunk-1 = -1 < start = 0,
+    // 会产出 end_byte < start_byte 的非法段(多文件路径已在别处防护,单文件
+    // scatter 路径此前缺失)。钳到 [1, 16] 保证 chunk >= 1。
+    // (BUG-BT-TINY-TORRENT-SEGMENT)
+    let n = (BT_VIRTUAL_SEGMENTS as i64).min(total_bytes.max(1)) as i32;
     let chunk = total_bytes / n as i64;
     let mut segs = Vec::with_capacity(n as usize);
 
@@ -1600,6 +1634,11 @@ fn build_piece_scatter_segments(
             } else {
                 (i as i64 + 1) * chunk - 1
             };
+            // 防御:钳制后正常不会发生,但若 chunk 仍致 end < start 则跳过,
+            // 决不向 Dart 发反向区间。(BUG-BT-TINY-TORRENT-SEGMENT)
+            if end < start {
+                continue;
+            }
             // Scatter the bytes unevenly so segments don't all look identical.
             // Use golden-ratio perturbation for a natural spread.
             let perturbation = ((i as f64 + 1.0) * 0.618033988749895).fract();
@@ -1650,6 +1689,11 @@ fn build_piece_scatter_segments(
         } else {
             (i as i64 + 1) * chunk - 1
         };
+        // 防御:钳制后正常不会发生,但若 chunk 仍致 end < start 则跳过,
+        // 决不向 Dart 发反向区间。(BUG-BT-TINY-TORRENT-SEGMENT)
+        if end < start {
+            continue;
+        }
         let seg_size = end - start + 1;
 
         // Count how many pieces belong to this segment
@@ -2467,7 +2511,11 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
             log_info!("[BT] task={} finished! total={}", short_id(&task_id), total);
 
             let final_total = if total > 0 { total } else { progress };
-            let _ = db.update_task_status(&task_id, STATUS_COMPLETED, "").await;
+            // 注意:此处**不再**无条件写 STATUS_COMPLETED。BT 数据此刻仍在 staging
+            // 目录,只有当下面的移动循环把所有选中文件成功落到 save_dir 后,才会写
+            // STATUS_COMPLETED 并发完成信号;否则改写 STATUS_ERROR 并返回 Err,
+            // 避免"未真正落盘的任务"显示为已完成(BUG-BT-COMPLETE-BEFORE-MOVE)。
+            // progress / total_bytes 只记录已下载字节数,与完成与否无关,可先写。
             let _ = db.update_task_progress(&task_id, final_total).await;
             let _ = db.update_task_total_bytes(&task_id, final_total).await;
 
@@ -2527,41 +2575,66 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                     }
                     Some((moves, top_level_name)) => {
                         let total = moves.len();
-                        let mut succeeded = 0usize;
-                        for (src, dst) in &moves {
-                            if !src.exists() {
-                                log_info!(
-                                    "[BT] task={} completion: expected staged file missing '{}'",
-                                    short_id(&task_id),
-                                    src.display(),
-                                );
-                                continue;
-                            }
-                            log_info!(
-                                "[BT] task={} moving '{}' → '{}'",
-                                short_id(&task_id),
-                                src.display(),
-                                dst.display(),
-                            );
-                            if let Some(parent) = dst.parent()
-                                && !parent.exists()
-                            {
-                                let _ = std::fs::create_dir_all(parent);
-                            }
-                            match move_path(src, dst) {
-                                Ok(()) => {
-                                    succeeded += 1;
-                                }
-                                Err(e) => {
+                        // 完成移动是阻塞的 std::fs rename / 跨设备递归复制,在
+                        // current_thread 的 bt-runtime 上直接执行会占满一个 worker,
+                        // 跨设备多 GB 复制时饿死其他 BT 任务。把整段移动循环搬进
+                        // spawn_blocking,再 .await 句柄;`_move_guard` 仍在外层
+                        // 持有,跨越此 await,保留 completion_move_lock 的序列化语义
+                        // (BUG-BT-COMPLETION-MOVE-BLOCKING)。
+                        let tid_for_move = task_id.clone();
+                        let move_result = tokio::task::spawn_blocking(move || {
+                            let mut succeeded = 0usize;
+                            for (src, dst) in &moves {
+                                if !src.exists() {
                                     log_info!(
-                                        "[BT] task={} move failed: {} ({})",
-                                        short_id(&task_id),
+                                        "[BT] task={} completion: expected staged file missing '{}'",
+                                        short_id(&tid_for_move),
                                         src.display(),
-                                        e
                                     );
+                                    continue;
+                                }
+                                log_info!(
+                                    "[BT] task={} moving '{}' → '{}'",
+                                    short_id(&tid_for_move),
+                                    src.display(),
+                                    dst.display(),
+                                );
+                                if let Some(parent) = dst.parent()
+                                    && !parent.exists()
+                                {
+                                    let _ = std::fs::create_dir_all(parent);
+                                }
+                                match move_path(src, dst) {
+                                    Ok(()) => {
+                                        succeeded += 1;
+                                    }
+                                    Err(e) => {
+                                        log_info!(
+                                            "[BT] task={} move failed: {} ({})",
+                                            short_id(&tid_for_move),
+                                            src.display(),
+                                            e
+                                        );
+                                    }
                                 }
                             }
-                        }
+                            succeeded
+                        })
+                        .await;
+                        // spawn_blocking 内部 panic → JoinError。保守按全部失败处理
+                        // (succeeded=0 → all_ok=false → 走 STATUS_ERROR 分支),
+                        // 决不会把未落盘任务标成已完成。
+                        let succeeded = match move_result {
+                            Ok(n) => n,
+                            Err(join_err) => {
+                                log_info!(
+                                    "[BT] task={} completion move task panicked: {}",
+                                    short_id(&task_id),
+                                    join_err,
+                                );
+                                0
+                            }
+                        };
                         let all_ok = total > 0 && succeeded == total;
                         if all_ok {
                             log_info!(
@@ -2587,6 +2660,44 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                     }
                 }
             };
+
+            // 移动失败兜底:数据仍在 staging,绝不能标已完成。
+            //
+            // 写 STATUS_ERROR(DB)、发 STATUS_ERROR 信号(而非 COMPLETED,且
+            // file_name 留空——最终磁盘名并不存在),停止做种后 return Err,使
+            // on_task_done 能感知失败(并在错误可重试时触发自动重试)。
+            // (BUG-BT-COMPLETE-BEFORE-MOVE)
+            if !all_moves_succeeded {
+                let msg = format!(
+                    "已完成但部分文件移动失败;数据保留在 {}",
+                    stage_dir.display()
+                );
+                log_info!(
+                    "[BT] task={} completion move failed — marking STATUS_ERROR: {}",
+                    short_id(&task_id),
+                    &msg,
+                );
+                let _ = db.update_task_status(&task_id, STATUS_ERROR, &msg).await;
+                let _ = progress_tx
+                    .send(ProgressUpdate {
+                        task_id: task_id.clone(),
+                        downloaded_bytes: final_total,
+                        total_bytes: final_total,
+                        status: STATUS_ERROR,
+                        error_message: msg.clone(),
+                        file_name: String::new(),
+                        segment_details: None,
+                    })
+                    .await;
+                // 仍要停止做种,但保留 staging 供恢复(下方清理已被
+                // all_moves_succeeded 守卫,此分支不会删 staging)。
+                let _ = shared_bt.pause_task(&task_id).await;
+                return Err(DownloadError::Other(msg));
+            }
+
+            // 全部移动成功:此刻文件确已落到 save_dir,才写 STATUS_COMPLETED 并
+            // 发完成信号——file_name 指向真实存在的磁盘名。
+            let _ = db.update_task_status(&task_id, STATUS_COMPLETED, "").await;
 
             // Send the single STATUS_COMPLETED signal with the true file name.
             let _ = progress_tx

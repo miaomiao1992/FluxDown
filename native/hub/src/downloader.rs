@@ -444,6 +444,40 @@ pub fn detect_content_encoding(headers: &reqwest::header::HeaderMap) -> Option<C
     None
 }
 
+/// 检测响应是否带有【存在但本引擎无法解码】的 Content-Encoding（如 `compress`）。
+///
+/// `detect_content_encoding` 把未知编码映射为 `None`，调用方据此当作 identity 原样
+/// 写盘——但若服务器实际做了我们不认识的压缩，原始压缩字节落盘即文件损坏
+/// （BUG-HTTP-UNKNOWN-ENCODING-RAW）。本函数在存在非 identity、且不属于受支持集合
+/// 的编码时返回该编码名，调用方应据此报错而非静默写出损坏内容。
+pub fn unsupported_content_encoding(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    let ce = headers.get(reqwest::header::CONTENT_ENCODING)?;
+    let value = ce.to_str().ok()?;
+    let mut unknown: Option<String> = None;
+    for part in value.split(',') {
+        let lower = part.trim().to_ascii_lowercase();
+        match lower.as_str() {
+            // 受支持（可解码）或无意义的占位 → 不算"不支持"。
+            "gzip" | "x-gzip" | "br" | "brotli" | "deflate" | "zstd" | "identity" | "" => {}
+            other => {
+                // 记录首个不认识的编码；只要存在一个受支持编码（上面分支命中）
+                // 即说明可解码，不应报错——故仅当【全程未命中任何受支持编码】时才
+                // 由调用方据此报错。这里先暂存。
+                if unknown.is_none() {
+                    unknown = Some(other.to_string());
+                }
+            }
+        }
+    }
+    // 若同时含受支持编码，detect_content_encoding 会返回 Some 并走解压路径，
+    // 调用方不会用到本结果；这里只在"纯未知编码"场景提供报错依据。
+    if detect_content_encoding(headers).is_some() {
+        None
+    } else {
+        unknown
+    }
+}
+
 /// Wrap a response byte stream with transparent decompression if the server
 /// returned a compressed `Content-Encoding`.  For `identity` or missing
 /// encoding, returns the original stream unchanged.
@@ -2080,6 +2114,32 @@ async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
         info.supports_range
     };
 
+    // Resume 一致性校验所需的【版本标识】（ETag / Last-Modified）。
+    //   • 首次下载（非续传）：用本次 probe 的值，并持久化到 DB，作为将来续传的基准。
+    //   • 续传：用【首次下载时存的原值】而非本次重新 probe 的值——这样若两次会话
+    //     之间服务器把文件换成了【相同长度但内容不同】的新版本，下游的 If-Range
+    //     会因 validator 不匹配触发服务器返回 200 全量 → 整文件重下，杜绝"旧前缀 +
+    //     新尾部"静默拼接（BUG-HTTP-SINGLE-RESUME-SPLICE）。仅靠本次 probe 值无法
+    //     检出：续传 probe 看到的已是新版本，validator 自洽却与磁盘旧数据不符。
+    let (resume_etag, resume_last_modified) = if p.is_resume {
+        let (oe, olm) = p.db.get_task_validator(&p.task_id).await.unwrap_or_default();
+        if oe.is_empty() && olm.is_empty() {
+            // 旧任务（升级前创建、无存档）或首次下载时服务器未提供 validator →
+            // 退回本次 probe 值（退化为旧行为，不会更糟）。
+            (info.etag.clone(), info.last_modified.clone())
+        } else {
+            (oe, olm)
+        }
+    } else {
+        if !info.etag.is_empty() || !info.last_modified.is_empty() {
+            let _ = p
+                .db
+                .set_task_validator(&p.task_id, &info.etag, &info.last_modified)
+                .await;
+        }
+        (info.etag.clone(), info.last_modified.clone())
+    };
+
     // 二次取消检查：缩小 DB 已更新但文件尚未创建的竞争窗口。
     if p.cancel_token.is_cancelled() {
         return Err(DownloadError::Cancelled);
@@ -2195,8 +2255,8 @@ async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
             &p.cancel_token,
             &p.speed_limiter,
             &p.spec,
-            &info.etag,
-            &info.last_modified,
+            &resume_etag,
+            &resume_last_modified,
         )
         .await
         {
@@ -2240,6 +2300,8 @@ async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
                     &p.speed_limiter,
                     &p.spec,
                     &actual_name,
+                    &resume_etag,
+                    &resume_last_modified,
                 )
                 .await?;
                 Some(result)
@@ -2286,13 +2348,37 @@ async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
             &p.speed_limiter,
             &p.spec,
             &actual_name,
+            &resume_etag,
+            &resume_last_modified,
         )
         .await?;
         Some(result)
     };
 
+    // 单流解压场景：落盘字节是【解压后】大小，与 probe 的【压缩】
+    // effective_total_bytes 无可比性——跳过基于大小的完整性校验，改为以磁盘实际
+    // 大小为准更新 DB，避免把正确文件误判为 "size mismatch"（BUG-HTTP-DECOMPRESS-INTEGRITY）。
+    let decompressed_single = single_result.as_ref().is_some_and(|r| r.decompressed);
+    if decompressed_single {
+        let file_len = tokio::fs::metadata(&temp_path)
+            .await
+            .map(|m| m.len() as i64)
+            .unwrap_or(0);
+        log_info!(
+            "[download] task {} single-stream decompressed: trusting on-disk size {} \
+             (probe compressed size was {})",
+            p.task_id,
+            file_len,
+            effective_total_bytes
+        );
+        let _ = p.db.update_task_total_bytes(&p.task_id, file_len).await;
+        effective_total_bytes = file_len;
+    }
+
     // Integrity check — verify download completeness.
-    if effective_total_bytes > 0 {
+    // 解压路径已在上方处理，这里 effective_total_bytes 已被改写为磁盘实际大小，
+    // 故 file_len == effective_total_bytes 自然成立、不会误杀。
+    if effective_total_bytes > 0 && !decompressed_single {
         if actual_use_segments {
             // Multi-segment: file is pre-allocated via set_len() so metadata
             // size always == total_bytes.  Check actual progress from DB instead.
@@ -2343,12 +2429,27 @@ async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
                     // Update DB so the stored total_bytes reflects reality.
                     let _ = p.db.update_task_total_bytes(&p.task_id, file_len).await;
                     effective_total_bytes = file_len;
-                } else if resp_cl <= 0 && file_len > 0 {
-                    // Server didn't send Content-Length (chunked transfer) but
-                    // the stream ended cleanly.  Trust the actual file.
+                } else if resp_cl <= 0
+                    && file_len > 0
+                    && (file_len >= effective_total_bytes || p.hint_file_size > 0)
+                {
+                    // Server didn't send Content-Length (chunked / connection-close
+                    // framing) but the stream ended cleanly.  Trust the actual file
+                    // ONLY when either:
+                    //   (a) we received at least the expected size (no truncation), or
+                    //   (b) the expected size was a mere browser hint (unreliable —
+                    //       servers regenerate PDFs / dynamic tokens shift the size),
+                    //       so a smaller-but-clean result is plausibly the real file.
+                    //
+                    // The dangerous case excluded here (BUG-HTTP-NO-CL-TRUNCATION):
+                    // a *probe-derived* (reliable) total of N, no Content-Length on
+                    // the download, and a clean connection close after K < N bytes.
+                    // Without this guard the truncated K-byte file would be accepted
+                    // as a complete download — silent data loss.  That case now falls
+                    // through to the size-mismatch error below so the user can retry.
                     log_info!(
                         "[download] task {} no response content-length, trusting \
-                         actual file size: hint={}, file={} (stream completed normally)",
+                         actual file size: expected={}, file={} (stream completed normally)",
                         p.task_id,
                         effective_total_bytes,
                         file_len
@@ -2481,6 +2582,11 @@ struct SingleDownloadResult {
     /// The `Content-Length` header value from the server's actual response.
     /// -1 when the header was absent (e.g. chunked transfer).
     response_content_length: i64,
+    /// True when the response carried a Content-Encoding and the body was
+    /// decompressed on-the-fly.  In this case the bytes on disk are the
+    /// *decompressed* size, which has no relation to the probe's (compressed)
+    /// `total_bytes` — the caller MUST skip the file-size integrity check.
+    decompressed: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2497,6 +2603,11 @@ async fn download_single(
     speed_limiter: &SpeedLimiter,
     spec: &RequestSpec,
     expected_filename: &str,
+    // 续传一致性校验：probe 阶段看到的文件版本标识。非空时，续传请求会附带
+    // `If-Range: <validator>`，由服务器判断文件是否变化——变了则返回 200 全量，
+    // actual_resume 随之为 false → 从 0 重下，杜绝"旧前缀 + 新尾部"的静默拼接。
+    expected_etag: &str,
+    expected_last_modified: &str,
 ) -> Result<SingleDownloadResult, DownloadError> {
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -2523,6 +2634,21 @@ async fn download_single(
     let mut req = build_request(client, url, spec.method.clone(), spec);
     if want_resume {
         req = req.header("Range", format!("bytes={}-", existing_len));
+        // If-Range：让服务器自己判定文件是否自 probe 起变化。validator 一致 →
+        // 返回 206 续传；不一致 → 返回 200 全量，下方 actual_resume 变 false →
+        // File::create 截断从 0 重下。优先用 ETag（强校验），无 ETag 时回退
+        // Last-Modified。两者皆空（如某些 FTP-over-HTTP 或裸 CDN）则不带 If-Range，
+        // 退化为原有行为（仍受 206/encoding 守卫保护，不会更糟）。
+        let validator = if !expected_etag.is_empty() {
+            Some(expected_etag.to_string())
+        } else if !expected_last_modified.is_empty() {
+            Some(expected_last_modified.to_string())
+        } else {
+            None
+        };
+        if let Some(v) = validator {
+            req = req.header("If-Range", v);
+        }
     }
 
     let mut resp = req.send().await?.error_for_status()?;
@@ -2597,6 +2723,14 @@ async fn download_single(
             task_id,
             encoding
         );
+    } else if let Some(unknown) = unsupported_content_encoding(resp.headers()) {
+        // 存在我们无法解码的 Content-Encoding（如 compress）。继续会把压缩字节
+        // 原样写盘 = 文件损坏。直接报错让用户感知，胜过静默产出损坏文件
+        // （BUG-HTTP-UNKNOWN-ENCODING-RAW）。
+        return Err(DownloadError::Other(format!(
+            "server returned unsupported Content-Encoding '{unknown}'; \
+             cannot decode — refusing to write raw compressed bytes to disk"
+        )));
     }
 
     // Verify the server actually honoured the Range request.
@@ -2754,6 +2888,7 @@ async fn download_single(
     let _ = db.update_task_progress(task_id, downloaded).await;
     Ok(SingleDownloadResult {
         response_content_length,
+        decompressed: encoding.is_some(),
     })
 }
 

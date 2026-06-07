@@ -237,6 +237,17 @@ async fn run_dash_download_inner(
         .await;
 
     let mpd = fetch_and_parse_mpd(&p.client, &p.url, &p.cookies, &p.extra_headers).await?;
+    // 多 Period DASH 尚未完全支持，仅下载首个 Period；后续 Period 被静默忽略
+    // 可能导致内容不完整。这里记录警告，便于用户排查。
+    if mpd.periods.len() > 1 {
+        log_info!(
+            "[dash-download] task {} warning: MPD contains {} Period(s), \
+             多 Period DASH 未完全支持，仅下载首个 Period，后续 {} 个 Period 将被忽略",
+            p.task_id,
+            mpd.periods.len(),
+            mpd.periods.len() - 1,
+        );
+    }
     let period = mpd
         .periods
         .first()
@@ -399,19 +410,28 @@ async fn run_dash_download_inner(
                 return Err(DownloadError::Cancelled);
             }
             Err(e) => {
+                // mux 失败（ffmpeg 未安装或失败）：音频保留为独立文件。
+                // 警告用户：需要 ffmpeg 才能合并，音频为独立文件。
                 log_info!(
-                    "[dash] task {} muxing failed (ffmpeg may not be installed): {} — \
-                     keeping separate audio file: {}",
+                    "[dash] task {} warning: muxing failed ({}). \
+                     需要 ffmpeg 才能合并音视频；音频已保存为独立文件: {}。\
+                     视频文件: {}",
                     p.task_id,
                     e,
-                    audio_path.display()
+                    audio_path.display(),
+                    dest_path.display(),
                 );
                 // Don't fail the download — both files are valid, just not merged
             }
         }
     }
 
-    let total = video_bytes + audio_bytes;
+    // mux 完成后以主输出文件的实际磁盘大小上报，避免 video+audio 之和与实际文件
+    // 大小不符（mux 成功：单文件大小；mux 失败：仅 video 文件大小）（BUG-DASH-MUX-SIZE-MISMATCH）。
+    let total = match tokio::fs::metadata(&dest_path).await {
+        Ok(meta) => meta.len() as i64,
+        Err(_) => video_bytes + audio_bytes,
+    };
     let _ = p.db.update_task_progress(&p.task_id, total).await;
     Ok(total)
 }
@@ -896,27 +916,28 @@ fn build_from_template(
         .unwrap_or_else(|| "repr".to_string());
     let bandwidth = representation.bandwidth.unwrap_or(0);
 
-    let init_url = template
-        .initialization
-        .clone()
-        .or_else(|| {
-            template
-                .Initialization
-                .as_ref()
-                .and_then(|i| i.sourceURL.clone())
-        })
-        .map(|u| resolve_url_template(&u, &repr_id, bandwidth, None, None))
-        .map(|u| join_base(base, &u))
-        .transpose()?;
-    let init_range = template
-        .Initialization
-        .as_ref()
-        .and_then(|i| i.range.clone());
-
-    let init_seg = init_url.map(|url| DashSegment {
-        url,
-        range: init_range,
-    });
+    // 正确配对 init URL 与 @range：
+    // - @initialization 属性（URL 字符串）优先，但它本身不携带 @range；
+    // - <Initialization> 子元素的 sourceURL 与 range 来自同一元素，可一起使用。
+    // 若把 @initialization 属性 URL 与 <Initialization> 元素的 range 混用，
+    // 会把不相关的 URL 和 range 组合，导致 HTTP Range 请求错误（BUG-DASH-INIT-RANGE-MIX）。
+    let init_seg: Option<DashSegment> = if let Some(attr_url) = template.initialization.as_deref() {
+        // @initialization 属性给出 URL，不附带 range
+        let resolved = resolve_url_template(attr_url, &repr_id, bandwidth, None, None);
+        let full_url = join_base(base, &resolved)?;
+        Some(DashSegment { url: full_url, range: None })
+    } else if let Some(elem) = template.Initialization.as_ref() {
+        // <Initialization> 子元素：sourceURL 与 range 来自同一元素，可配对使用
+        if let Some(src_url) = elem.sourceURL.as_deref() {
+            let resolved = resolve_url_template(src_url, &repr_id, bandwidth, None, None);
+            let full_url = join_base(base, &resolved)?;
+            Some(DashSegment { url: full_url, range: elem.range.clone() })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     let media_template = template
         .media
@@ -1065,22 +1086,27 @@ fn build_from_template(
                     "segment count calculation overflow (duration * timescale)".to_string(),
                 )
             })?;
-        let dur = duration as u128;
-        if dur == 0 {
+        // duration 为 f64（清单中常见小数，如 2.5），不能 as u128 向零截断；
+        // 用浮点除法+ceil 计算段数，避免 duration=2.5 时少/多算一段（BUG-DASH-DURATION-TRUNCATION）。
+        let seg_count_f = (total_units as f64 / duration).ceil();
+        if !seg_count_f.is_finite() || seg_count_f < 0.0 {
             return Err(DownloadError::Other(
-                "SegmentTemplate@duration is zero (after cast)".to_string(),
+                "SegmentTemplate@duration yields non-finite segment count".to_string(),
             ));
         }
-        let seg_count = total_units.div_ceil(dur);
-        let seg_count_usize = seg_count as usize;
+        let seg_count_usize = seg_count_f as usize;
         if seg_count_usize > MAX_SEGMENTS {
             return Err(DownloadError::Other(format!(
                 "segment count exceeds MAX_SEGMENTS ({MAX_SEGMENTS})"
             )));
         }
+        let pto = template.presentationTimeOffset.unwrap_or(0);
         let mut number = start_number;
-        let mut time_value: u64 = 0;
-        for _ in 0..seg_count_usize {
+        for n in 0..seg_count_usize {
+            // $Time$ 按每段独立计算（而非累加），消除小数 duration 的逐段漂移：
+            //   time = presentationTimeOffset + round((n - 0) * duration)
+            // n 从 0 开始，number 从 startNumber 开始（BUG-DASH-DURATION-TRUNCATION）。
+            let time_value = pto.saturating_add((n as f64 * duration).round() as u64);
             let url = resolve_url_template(
                 &media_template,
                 &repr_id,
@@ -1093,7 +1119,6 @@ fn build_from_template(
                 range: None,
             });
             number += 1;
-            time_value = time_value.saturating_add(duration as u64);
         }
     } else {
         return Err(DownloadError::Other(
@@ -1198,8 +1223,10 @@ async fn download_track_inner(
     for (idx, segment) in segment_iter.enumerate() {
         if p.cancel_token.is_cancelled() {
             file.flush().await?;
+            // 使用单调写入：resume 从 0 开始重下时，不覆盖 DB 中更大的存量进度值，
+            // 避免进度回退（BUG-DASH-RESUME-FULL-REDOWNLOAD）。
             let _ =
-                p.db.update_task_progress(&p.task_id, progress_state.downloaded_bytes)
+                p.db.update_task_progress_monotonic(&p.task_id, progress_state.downloaded_bytes)
                     .await;
             return Err(DownloadError::Cancelled);
         }
@@ -1216,8 +1243,9 @@ async fn download_track_inner(
         {
             Ok(b) => b,
             Err(e) => {
+                // 使用单调写入，同上原因（BUG-DASH-RESUME-FULL-REDOWNLOAD）。
                 let _ =
-                    p.db.update_task_progress(&p.task_id, progress_state.downloaded_bytes)
+                    p.db.update_task_progress_monotonic(&p.task_id, progress_state.downloaded_bytes)
                         .await;
                 return Err(e);
             }
@@ -1243,8 +1271,9 @@ async fn download_track_inner(
         }
 
         if progress_state.last_db_save.elapsed().as_secs() >= DB_SAVE_INTERVAL_SECS {
+            // 使用单调写入，同上原因（BUG-DASH-RESUME-FULL-REDOWNLOAD）。
             let _ =
-                p.db.update_task_progress(&p.task_id, progress_state.downloaded_bytes)
+                p.db.update_task_progress_monotonic(&p.task_id, progress_state.downloaded_bytes)
                     .await;
             progress_state.last_db_save = std::time::Instant::now();
         }

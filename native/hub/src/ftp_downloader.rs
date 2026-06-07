@@ -151,6 +151,13 @@ use suppaftp::types::FileType;
 /// before error is 30s × 3 = 90s.
 const FTP_DATA_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// BUG-FTP-CONTROL-IDLE-421 修复：在调用 finalize_retr_stream 读取 226 响应前，
+/// 先给控制连接套接字设置读超时，防止服务器因长传输期间控制连接空闲而发 421
+/// 断开后，finalize_retr_stream 永久阻塞等待永不到来的响应。
+/// 60 秒足够覆盖正常的 226 延迟，同时保证控制连接掉线时表现为可重试错误而非
+/// 无限挂起。
+const FTP_CONTROL_READ_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Connect to an FTP server, optionally through a proxy.
 ///
 /// Proxy modes:
@@ -1090,6 +1097,11 @@ async fn ftp_download_single(
             if cancelled.load(Ordering::SeqCst) {
                 drop(data_stream);
             } else {
+                // BUG-FTP-CONTROL-IDLE-421 修复：读取 226 前给控制连接设超时，
+                // 防止服务器 421 断开后 finalize_retr_stream 无限阻塞。
+                ftp.get_ref()
+                    .set_read_timeout(Some(FTP_CONTROL_READ_TIMEOUT))
+                    .ok();
                 let _ = ftp.finalize_retr_stream(data_stream);
             }
             let _ = ftp.quit();
@@ -1133,13 +1145,31 @@ async fn ftp_download_single(
                         let n = bytes.len();
                         // Speed limiter
                         let mut offset = 0usize;
+                        let mut write_err: Option<std::io::Error> = None;
                         while offset < n {
                             let remaining = (n - offset) as u64;
                             let allowed = speed_limiter.consume(remaining).await;
                             let end = offset + allowed as usize;
-                            file.write_all(&bytes[offset..end]).await?;
+                            if let Err(e) = file.write_all(&bytes[offset..end]).await {
+                                write_err = Some(e);
+                                break;
+                            }
                             offset = end;
                         }
+
+                        // BUG-FTP-SINGLE-WRITEERR-LEAK 修复：镜像多段写错误处理，
+                        // 捕获写错误后先持久化进度，再设取消标志、关闭 channel、
+                        // 等待 reader 结束，最后返回错误，防止 cancel_watcher 泄漏
+                        // 且避免 ftp_reader 阻塞 blocking 线程的 chunk_tx 死锁。
+                        if let Some(e) = write_err {
+                            let _ = db.update_task_progress(&task_id, downloaded).await;
+                            cancelled_writer.store(true, Ordering::SeqCst);
+                            cancel_watcher.abort();
+                            chunk_rx.close();
+                            let _ = ftp_reader.await;
+                            return Err(DownloadError::Io(e));
+                        }
+
                         downloaded += n as i64;
 
                         if last_report.elapsed().as_millis() >= 200 {
@@ -1602,6 +1632,11 @@ async fn ftp_do_segment(
             if cancelled.load(Ordering::SeqCst) {
                 drop(data_stream);
             } else {
+                // BUG-FTP-CONTROL-IDLE-421 修复：读取 226 前给控制连接设超时，
+                // 防止服务器 421 断开后 finalize_retr_stream 无限阻塞。
+                ftp.get_ref()
+                    .set_read_timeout(Some(FTP_CONTROL_READ_TIMEOUT))
+                    .ok();
                 let _ = ftp.finalize_retr_stream(data_stream);
             }
             let _ = ftp.quit();
@@ -1712,9 +1747,18 @@ async fn ftp_do_segment(
                         }
 
                         if last_db_save.elapsed().as_secs() >= DB_SAVE_INTERVAL_SECS {
-                            let _ = db
-                                .update_segment_progress(task_id, seg_idx, seg_downloaded)
-                                .await;
+                            // BUG-FTP-HOLE-PERIODIC-SAVE 修复：周期落库前先将
+                            // BufWriter 内核缓冲与页缓存刷到磁盘，保证 DB 中记录
+                            // 的 seg_downloaded 不超过已持久化的字节数。若 flush
+                            // 或 sync_data 失败，则跳过本次落库并重置计时器；
+                            // 下次触发时再尝试，不因周期保存失败而中断下载。
+                            let sync_ok = file.flush().await.is_ok()
+                                && file.get_ref().sync_data().await.is_ok();
+                            if sync_ok {
+                                let _ = db
+                                    .update_segment_progress(task_id, seg_idx, seg_downloaded)
+                                    .await;
+                            }
                             last_db_save = std::time::Instant::now();
                         }
                     }
@@ -1725,6 +1769,7 @@ async fn ftp_do_segment(
     }
 
     file.flush().await?;
+    file.get_ref().sync_data().await?;
     if let Ok(mut states) = seg_states.lock()
         && let Some(s) = states.iter_mut().find(|s| s.index == seg_idx)
     {

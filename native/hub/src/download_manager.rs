@@ -2100,6 +2100,17 @@ impl DownloadManager {
     pub async fn resume_task(&mut self, task_id: &str) {
         // 用户手动恢复时重置自动重试计数，让下次失败重新获得完整重试配额。
         self.auto_retry_counts.remove(task_id);
+        self.resume_task_inner(task_id).await;
+    }
+
+    /// 自动重试路径专用：恢复任务但**不**重置自动重试计数。
+    /// 与 resume_task 的区别仅在于跳过 auto_retry_counts.remove，
+    /// 使累积计数得以持久到下次失败，从而正确触发重试上限与递增退避。
+    pub async fn resume_task_auto(&mut self, task_id: &str) {
+        self.resume_task_inner(task_id).await;
+    }
+
+    async fn resume_task_inner(&mut self, task_id: &str) {
 
         if self.active_tasks.contains_key(task_id) {
             // A task can be in active_tokens but already terminal in the DB:
@@ -2960,6 +2971,13 @@ impl DownloadManager {
                     let file_name = t.file_name.clone();
                     // 供 handle 超时后的延迟二次清理使用（F010）。
                     let save_dir_owned = t.save_dir.clone();
+                    // BUG-MGR-BATCH-DELETE-RESERVATION-LEAK 修复：
+                    // 批量删除在 tokio::spawn 内无法访问 &mut self，故 abort 超时时
+                    // on_task_done 永不执行，预订永远不会被释放。在进入 spawn 之前的
+                    // &mut self 上下文中主动移除预订（HashSet::remove 幂等，无副作用）。
+                    let reserved = PathBuf::from(&t.save_dir)
+                        .join(format!("{}{}", t.file_name, downloader::TEMP_EXT));
+                    self.reserved_temp_paths.remove(&reserved);
                     cleanup_futs.push(tokio::spawn(async move {
                         // Wait for this task's download handle (10s per-task timeout).
                         // 超时后 abort 外层 future，加速纯 async 任务释放连接/句柄，

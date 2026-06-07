@@ -78,39 +78,58 @@ impl Db {
 
         // --- Schema migrations (safe to re-run) ---
 
+        // 辅助：执行 ALTER TABLE … ADD COLUMN；若 SQLite 报"duplicate column"
+        // 则视为列已存在（正常幂等情况），静默忽略；其他错误（SQLITE_FULL、
+        // IOERR、corruption 等）向上传播，让 Db::open 返回 Err，避免静默遮盖。
+        let add_column = |sql: &str| -> Result<(), DbError> {
+            match conn.execute_batch(sql) {
+                Ok(_) => Ok(()),
+                Err(e) => {
+                    if e.to_string().to_lowercase().contains("duplicate column") {
+                        Ok(())
+                    } else {
+                        Err(DbError::Sqlite(e))
+                    }
+                }
+            }
+        };
+
         // Phase 2: per-task proxy URL column
-        // ALTER TABLE … ADD COLUMN fails with "duplicate column" if already exists,
-        // so we silently ignore that specific error.
-        let _ =
-            conn.execute_batch("ALTER TABLE tasks ADD COLUMN proxy_url TEXT NOT NULL DEFAULT '';");
+        add_column("ALTER TABLE tasks ADD COLUMN proxy_url TEXT NOT NULL DEFAULT '';")?;
 
         // Phase 3: named queue assignment column
-        let _ =
-            conn.execute_batch("ALTER TABLE tasks ADD COLUMN queue_id TEXT NOT NULL DEFAULT '';");
+        add_column("ALTER TABLE tasks ADD COLUMN queue_id TEXT NOT NULL DEFAULT '';")?;
 
         // Phase 4: per-queue default segment count
-        let _ = conn.execute_batch(
+        add_column(
             "ALTER TABLE queues ADD COLUMN default_segments INTEGER NOT NULL DEFAULT 0;",
-        );
+        )?;
 
         // Phase 5: per-task checksum for integrity verification
-        let _ =
-            conn.execute_batch("ALTER TABLE tasks ADD COLUMN checksum TEXT NOT NULL DEFAULT '';");
+        add_column("ALTER TABLE tasks ADD COLUMN checksum TEXT NOT NULL DEFAULT '';")?;
 
         // Phase 6: per-queue default user-agent
-        let _ = conn.execute_batch(
+        add_column(
             "ALTER TABLE queues ADD COLUMN default_user_agent TEXT NOT NULL DEFAULT '';",
-        );
+        )?;
 
         // Phase 7: BT selected file indices (comma-separated, empty = all files)
-        let _ = conn.execute_batch(
+        add_column(
             "ALTER TABLE tasks ADD COLUMN bt_selected_files TEXT NOT NULL DEFAULT '';",
-        );
+        )?;
 
         // Phase 8: BT custom name — user-specified rename target, stored
         // separately so Phase 1/3 engine callbacks never overwrite it.
-        let _ = conn
-            .execute_batch("ALTER TABLE tasks ADD COLUMN bt_custom_name TEXT NOT NULL DEFAULT '';");
+        add_column("ALTER TABLE tasks ADD COLUMN bt_custom_name TEXT NOT NULL DEFAULT '';")?;
+
+        // Phase 9: resume 一致性校验所需的【原始】文件版本标识。首次下载（非续传）
+        // 时记录 probe 看到的 ETag / Last-Modified；续传时用【这里存的原值】构造
+        // If-Range，从而检出"两次会话之间服务器换了文件（即便长度相同）"——避免
+        // 把旧前缀 + 新尾部静默拼接（BUG-HTTP-SINGLE-RESUME-SPLICE）。
+        add_column("ALTER TABLE tasks ADD COLUMN orig_etag TEXT NOT NULL DEFAULT '';")?;
+        add_column(
+            "ALTER TABLE tasks ADD COLUMN orig_last_modified TEXT NOT NULL DEFAULT '';",
+        )?;
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -305,8 +324,12 @@ impl Db {
                 // First-time probe — always write the value.
                 true
             } else if probed_total_bytes < stored_total {
-                // File shrank — always update to avoid out-of-range requests.
-                true
+                // File shrank — apply symmetric CDN-drift tolerance.
+                // 微小的负漂移（动态头注入、签名 URL 尾部差异等）同样视为漂移，
+                // 保留 stored_total 以维持 segment end_byte 一致性；只有
+                // 收缩幅度超过阈值时才视为真正的文件变化。
+                let delta = stored_total - probed_total_bytes;
+                delta > threshold
             } else if probed_total_bytes > stored_total {
                 // File grew (or CDN drift).  Only treat as a genuine change
                 // when the delta exceeds the CDN-drift tolerance threshold.
@@ -516,8 +539,10 @@ impl Db {
         let conn = self.conn.clone();
         let ids = ids.to_vec();
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().map_err(|_| DbError::LockPoisoned)?;
-            conn.execute_batch("BEGIN IMMEDIATE")?;
+            // mut 是 rusqlite::Connection::transaction_with_behavior 的必要条件。
+            let mut conn = conn.lock().map_err(|_| DbError::LockPoisoned)?;
+            // RAII 事务：任何 `?` 提前返回时 Drop 自动 ROLLBACK，不会泄漏事务。
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             // SQLite has a max variable limit of 999; chunk to stay safe.
             const CHUNK: usize = 500;
             for chunk in ids.chunks(CHUNK) {
@@ -532,18 +557,18 @@ impl Db {
                     "DELETE FROM task_segments WHERE task_id IN ({})",
                     placeholders
                 );
-                conn.execute(&sql, params.as_slice())?;
+                tx.execute(&sql, params.as_slice())?;
 
                 let sql = format!(
                     "DELETE FROM torrent_files WHERE task_id IN ({})",
                     placeholders
                 );
-                conn.execute(&sql, params.as_slice())?;
+                tx.execute(&sql, params.as_slice())?;
 
                 let sql = format!("DELETE FROM tasks WHERE id IN ({})", placeholders);
-                conn.execute(&sql, params.as_slice())?;
+                tx.execute(&sql, params.as_slice())?;
             }
-            conn.execute_batch("COMMIT")?;
+            tx.commit()?;
             Ok(())
         })
         .await?
@@ -1088,6 +1113,54 @@ impl Db {
                 params![total_bytes, id],
             )?;
             Ok(())
+        })
+        .await?
+    }
+
+    /// 记录首次下载时 probe 看到的【原始】版本标识（ETag / Last-Modified）。
+    /// 仅在非续传的首次下载阶段写入，作为后续续传 If-Range 一致性校验的基准。
+    pub async fn set_task_validator(
+        &self,
+        id: &str,
+        etag: &str,
+        last_modified: &str,
+    ) -> Result<(), DbError> {
+        let conn = self.conn.clone();
+        let id = id.to_owned();
+        let etag = etag.to_owned();
+        let last_modified = last_modified.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().map_err(|_| DbError::LockPoisoned)?;
+            conn.execute(
+                "UPDATE tasks SET orig_etag = ?1, orig_last_modified = ?2 WHERE id = ?3",
+                params![etag, last_modified, id],
+            )?;
+            Ok(())
+        })
+        .await?
+    }
+
+    /// 读取首次下载记录的原始版本标识，返回 `(orig_etag, orig_last_modified)`。
+    /// 旧任务（升级前创建、列为默认空）或服务器未提供时返回 `("", "")`。
+    pub async fn get_task_validator(&self, id: &str) -> Result<(String, String), DbError> {
+        let conn = self.conn.clone();
+        let id = id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().map_err(|_| DbError::LockPoisoned)?;
+            match conn.query_row(
+                "SELECT orig_etag, orig_last_modified FROM tasks WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0).unwrap_or_default(),
+                        row.get::<_, String>(1).unwrap_or_default(),
+                    ))
+                },
+            ) {
+                Ok(v) => Ok(v),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok((String::new(), String::new())),
+                Err(e) => Err(DbError::Sqlite(e)),
+            }
         })
         .await?
     }

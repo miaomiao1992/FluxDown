@@ -557,7 +557,9 @@ pub async fn run(db_dir: PathBuf) {
                 // 如果用户已手动暂停、恢复或删除了该任务，跳过重试。
                 if manager.is_task_in_error(&task_id).await {
                     log_info!("[actor] auto-retry: resuming task {}", task_id);
-                    manager.resume_task(&task_id).await;
+                    // 使用 resume_task_auto 而非 resume_task：不重置自动重试计数，
+                    // 使 on_task_done 中的累积计数能正确递增并最终触发重试上限。
+                    manager.resume_task_auto(&task_id).await;
                 } else {
                     log_info!("[actor] auto-retry: skipping task {} (no longer in error state)", task_id);
                 }

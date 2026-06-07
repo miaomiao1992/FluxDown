@@ -151,6 +151,15 @@ pub struct HlsSegment {
     pub uri: String,
     pub duration: f32,
     pub key: Option<HlsKey>,
+    /// EXT-X-BYTERANGE 子区间 `(offset, length)`(字节)。`None` 表示整段就是
+    /// 整个 `uri` 资源;`Some` 表示该段只是 `uri` 的一个子区间,下载时必须发
+    /// `Range: bytes=offset-(offset+length-1)` 头并要求 206,否则多个段会各自
+    /// 下载整文件、拼出 N 份完整副本(巨量损坏 + 撑爆磁盘)。
+    pub byte_range: Option<(u64, u64)>,
+    /// 本段是否紧跟 EXT-X-DISCONTINUITY(与前一段存在不连续点)。当前仅解析
+    /// 并保留该标志;隐式 IV 仍按 RFC 8216 用绝对 Media Sequence Number 计算
+    /// (见 `compute_default_iv` 注释),不连续点不重置该序号。
+    pub discontinuity: bool,
 }
 
 /// Encryption key info for a segment.
@@ -261,9 +270,23 @@ pub async fn parse_m3u8(
             let mut total_duration: f32 = 0.0;
             let mut current_key: Option<HlsKey> = None;
             let mut segments: Vec<HlsSegment> = Vec::with_capacity(media.segments.len());
+            // EXT-X-BYTERANGE 省略 @offset 时,offset = 同一 uri 上一子区间结束
+            // 位置+1(按出现顺序累计)。键为已解析的绝对段 URI,值为该 uri 上
+            // "下一个隐式子区间的起始 offset"(即上一子区间的 offset+length)。
+            let mut byterange_next_offset: HashMap<String, u64> = HashMap::new();
 
             for seg in &media.segments {
                 total_duration += seg.duration;
+
+                // EXT-X-MAP(fMP4/CMAF 初始化段)目前无法正确产出可解码的 fMP4
+                // 输出:本引擎只拼接媒体分片(moof+mdat),缺少前置 ftyp+moov
+                // 初始化段则文件不可解码。为杜绝"静默产出不可播放文件却标记完成",
+                // 检测到 EXT-X-MAP 即报错而非继续(安全退化方案)。
+                if seg.map.is_some() {
+                    return Err(DownloadError::Other(
+                        "EXT-X-MAP (fMP4/CMAF 初始化段) 暂不支持".to_string(),
+                    ));
+                }
 
                 if let Some(ref key) = seg.key {
                     current_key = match &key.method {
@@ -308,10 +331,36 @@ pub async fn parse_m3u8(
                     }
                 });
 
+                let resolved_uri = resolve_uri(&base_url, &seg.uri);
+
+                // EXT-X-BYTERANGE 解析:同一 uri 的多个段共享底层大文件的不同
+                // 子区间。@offset 缺省时按出现顺序在该 uri 上累计(上一子区间
+                // 结束位置)。offset+length 可能溢出 u64 → checked_add 报错而非
+                // 回绕(回绕会请求错误区间、拼出损坏数据)。
+                let byte_range = match &seg.byte_range {
+                    Some(br) => {
+                        let offset = match br.offset {
+                            Some(o) => o,
+                            None => byterange_next_offset.get(&resolved_uri).copied().unwrap_or(0),
+                        };
+                        let next = offset.checked_add(br.length).ok_or_else(|| {
+                            DownloadError::Other(format!(
+                                "EXT-X-BYTERANGE offset+length overflow (offset={}, length={})",
+                                offset, br.length
+                            ))
+                        })?;
+                        byterange_next_offset.insert(resolved_uri.clone(), next);
+                        Some((offset, br.length))
+                    }
+                    None => None,
+                };
+
                 segments.push(HlsSegment {
-                    uri: resolve_uri(&base_url, &seg.uri),
+                    uri: resolved_uri,
                     duration: seg.duration,
                     key: seg_key,
+                    byte_range,
+                    discontinuity: seg.discontinuity,
                 });
             }
 
@@ -440,8 +489,18 @@ fn parse_resume_checkpoint(s: &str) -> (usize, i64, Option<u64>) {
 
 /// Compute the default IV from media_sequence + segment_index.
 /// IV = (media_sequence + segment_index) as 128-bit big-endian.
+///
+/// `sequence_number` 是该段的绝对 Media Sequence Number(RFC 8216 §5.2:无显式
+/// IV 时以段的 Media Sequence Number 作 IV)。该序号在整个播放列表内单调递增,
+/// **不**在 EXT-X-DISCONTINUITY 处重置——不连续点改变的是 Discontinuity
+/// Sequence Number,而非 Media Sequence Number。因此跟踪到的 `discontinuity`
+/// 标志不参与隐式 IV 计算;若在此处"重置"序号反而会让合规加密流解出乱码。
+///
+/// 用 `saturating_add` 而非 `+`:序号接近 `u64::MAX` 时无检查加法在 debug 下
+/// panic、在 release 下回绕得到错误 IV;饱和到 `u64::MAX` 不 panic,且此规模
+/// 的段索引在现实播放列表中不可能出现,饱和值不会影响真实解密。
 fn compute_default_iv(media_sequence: u64, segment_index: usize) -> [u8; 16] {
-    let sequence_number = media_sequence + segment_index as u64;
+    let sequence_number = media_sequence.saturating_add(segment_index as u64);
     let mut iv = [0u8; 16];
     // Write as 128-bit big-endian: lower 8 bytes at offset 8
     iv[8..16].copy_from_slice(&sequence_number.to_be_bytes());
@@ -469,6 +528,14 @@ fn decrypt_segment(
     iv: &[u8; 16],
     seg_idx: usize,
 ) -> Result<Vec<u8>, DownloadError> {
+    // 空输入短路:加密段下载到 0 字节时,走对齐分支调
+    // `decrypt_padded_mut::<Pkcs7>(&mut [])` 会返回 UnpadError,导致整个下载被
+    // 当作永久失败中止。空密文解密只能是空明文,直接返回 `Vec::new()`,放在
+    // 取模 / PKCS7 逻辑之前。
+    if data.is_empty() {
+        return Ok(Vec::new());
+    }
+
     let key_array: [u8; 16] = key
         .try_into()
         .map_err(|_| DownloadError::Other("AES key must be 16 bytes".to_string()))?;
@@ -973,6 +1040,7 @@ async fn run_hls_download_inner(
             break;
         };
         let uri = segment.uri.clone();
+        let byte_range = segment.byte_range;
         // Extract only the encryption fields needed to decrypt this segment.
         let key_info: Option<(String, Option<String>)> = segment.key.as_ref().and_then(|k| {
             if k.method == HlsKeyMethod::Aes128 && !k.uri.is_empty() {
@@ -1007,6 +1075,7 @@ async fn run_hls_download_inner(
             let outcome = download_and_decrypt_segment(
                 &client,
                 &uri,
+                byte_range,
                 &cookies,
                 &playlist_url,
                 &cancel,
@@ -1395,6 +1464,7 @@ async fn remux_ts_to_mp4(ts_path: &std::path::Path, task_id: &str) -> Option<Pat
 async fn download_and_decrypt_segment(
     client: &Client,
     uri: &str,
+    byte_range: Option<(u64, u64)>,
     cookies: &str,
     playlist_url: &str,
     cancel_token: &tokio_util::sync::CancellationToken,
@@ -1408,6 +1478,7 @@ async fn download_and_decrypt_segment(
     let seg_data = download_segment_with_retry(
         client,
         uri,
+        byte_range,
         cookies,
         playlist_url,
         cancel_token,
@@ -1452,6 +1523,7 @@ async fn download_and_decrypt_segment(
 async fn download_segment_with_retry(
     client: &Client,
     url: &str,
+    byte_range: Option<(u64, u64)>,
     cookies: &str,
     playlist_url: &str,
     cancel_token: &tokio_util::sync::CancellationToken,
@@ -1465,6 +1537,7 @@ async fn download_segment_with_retry(
         match download_segment_once(
             client,
             url,
+            byte_range,
             cookies,
             playlist_url,
             extra_headers,
@@ -1503,6 +1576,7 @@ async fn download_segment_with_retry(
 async fn download_segment_once(
     client: &Client,
     url: &str,
+    byte_range: Option<(u64, u64)>,
     cookies: &str,
     playlist_url: &str,
     extra_headers: &std::collections::HashMap<String, String>,
@@ -1516,20 +1590,63 @@ async fn download_segment_once(
     // 应用浏览器扩展捕获的额外请求头
     req = crate::downloader::apply_extra_headers(req, extra_headers);
 
+    // EXT-X-BYTERANGE:同一 uri 的多段是底层大文件的不同子区间,必须发
+    // `Range: bytes=offset-(offset+length-1)` 头只取本段区间。否则每段都拉整
+    // 文件,N 段拼成 N 份完整副本(巨量损坏 + 撑爆磁盘)。range_end 用
+    // checked 运算防溢出(offset 已在解析期与 length 一起校验过,这里再保一道)。
+    if let Some((offset, length)) = byte_range {
+        if length == 0 {
+            return Err(DownloadError::Other(
+                "EXT-X-BYTERANGE length must be > 0".to_string(),
+            ));
+        }
+        let range_end = match offset.checked_add(length).and_then(|e| e.checked_sub(1)) {
+            Some(end) => end,
+            None => {
+                return Err(DownloadError::Other(format!(
+                    "EXT-X-BYTERANGE range overflow (offset={}, length={})",
+                    offset, length
+                )));
+            }
+        };
+        req = req.header("Range", format!("bytes={}-{}", offset, range_end));
+    }
+
     let resp = tokio::select! {
         _ = cancel_token.cancelled() => return Err(DownloadError::Cancelled),
         r = req.send() => r?.error_for_status()?,
     };
 
+    // ranged 请求(EXT-X-BYTERANGE)必须得到 206 Partial Content。若服务器忽略
+    // Range 头返回 200 全量,则收到的是整个底层文件而非本段子区间;放行会把
+    // 整文件当成本段拼进输出造成损坏。故对 ranged 请求强制要求 206,否则报错
+    // (触发上层重试,仍失败则整任务失败,绝不静默产出损坏文件)。
+    if byte_range.is_some() && resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+        return Err(DownloadError::Other(format!(
+            "EXT-X-BYTERANGE 请求未返回 206 Partial Content (got {}); \
+             服务器不支持 Range,无法正确切分子区间",
+            resp.status()
+        )));
+    }
+
     // Transparently decompress if the server returned compressed content.
     let encoding = crate::downloader::detect_content_encoding(resp.headers());
-    // 声明的 body 字节数。仅当响应"无 Content-Encoding"时它才等于实际写入
-    // 的字节数；压缩响应解压后 buf 长度必然 != content_length(压缩后的值),
-    // 故下方的截断校验只对未压缩响应启用,避免误伤合法压缩分段。
-    let declared_len = if encoding.is_none() {
-        resp.content_length()
-    } else {
-        None
+    // 声明的 body 字节数(EOF 后据此做截断校验)。
+    // - 对 ranged 请求:用 EXT-X-BYTERANGE 声明的 length 作为期望长度,而非
+    //   响应的 Content-Length(206 的 Content-Length 是子区间长度,正常应相等,
+    //   但以播放列表声明为准更稳妥),且 ranged 子区间通常未压缩。
+    // - 对普通请求:仅当响应"无 Content-Encoding"时 content_length 才等于实际
+    //   写入字节数;压缩响应解压后 buf 长度必然 != content_length(压缩后的值),
+    //   故只对未压缩响应启用,避免误伤合法压缩分段。
+    let declared_len = match byte_range {
+        Some((_, length)) => Some(length),
+        None => {
+            if encoding.is_none() {
+                resp.content_length()
+            } else {
+                None
+            }
+        }
     };
     let raw_stream = resp.bytes_stream();
     let mut stream = crate::downloader::maybe_decompress_stream(raw_stream, encoding);
@@ -1557,15 +1674,16 @@ async fn download_segment_once(
         buf.extend_from_slice(&chunk_data);
     }
 
-    // 完整性校验：当服务器声明了 Content-Length(且无压缩)时,EOF 后实际字节
-    // 必须恰好等于声明值。服务器在分段中途关闭连接(TCP RST / chunked 提前
-    // EOF)会让 stream 返回 None 被当作正常结束,只写入部分字节;不校验会把
-    // 截断分段静默 append 进 .ts 造成缺帧/花屏,而任务被标记完成。返回 Err
-    // 触发上层 download_segment_with_retry 重试。
+    // 完整性校验：当有期望长度(普通请求的 Content-Length / ranged 请求的
+    // EXT-X-BYTERANGE length)时,EOF 后实际字节必须恰好等于该值。服务器在分段
+    // 中途关闭连接(TCP RST / chunked 提前 EOF)会让 stream 返回 None 被当作正常
+    // 结束,只写入部分字节;不校验会把截断分段静默 append 进输出造成缺帧/花屏,
+    // 而任务被标记完成。对 ranged 请求,收到字节数也据此对齐到本子区间长度
+    // (而非整文件)。返回 Err 触发上层 download_segment_with_retry 重试。
     if let Some(expected) = declared_len {
         if buf.len() as u64 != expected {
             return Err(DownloadError::Other(format!(
-                "HLS segment truncated: got {} bytes, declared content-length {}",
+                "HLS segment truncated: got {} bytes, expected {}",
                 buf.len(),
                 expected
             )));
@@ -1777,6 +1895,31 @@ mod tests {
             Err(e) => assert!(e.to_string().contains("segment 9"), "got: {e}"),
             Ok(_) => panic!("data shorter than one AES block must error"),
         }
+    }
+
+    #[test]
+    fn test_decrypt_segment_empty_is_ok_empty() {
+        // BUG-HLS-EMPTY-SEGMENT-PKCS7:加密段下载到 0 字节时必须短路返回空,
+        // 而非走 PKCS7 分支报 UnpadError 把整个下载当永久失败中止。
+        let key = [0x12u8; 16];
+        let iv = [0x34u8; 16];
+        let mut data: Vec<u8> = Vec::new();
+        match decrypt_segment(&mut data, &key, &iv, 0) {
+            Ok(out) => assert!(out.is_empty(), "empty ciphertext must decrypt to empty"),
+            Err(e) => panic!("empty input must not error: {e}"),
+        }
+    }
+
+    // --- BUG-HLS-MEDIASEQ-OVERFLOW: saturating IV sequence ---
+
+    #[test]
+    fn test_compute_default_iv_saturates_no_overflow() {
+        // media_sequence 接近 u64::MAX 时,序号加法必须饱和而非 panic/回绕。
+        let iv = compute_default_iv(u64::MAX, 5);
+        let mut expected = [0u8; 16];
+        // 饱和到 u64::MAX → 低 8 字节全 0xFF。
+        expected[8..16].copy_from_slice(&u64::MAX.to_be_bytes());
+        assert_eq!(iv, expected);
     }
 
     // --- F040: resume checkpoint parsing (backward compatibility) ---
