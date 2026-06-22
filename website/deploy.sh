@@ -67,6 +67,11 @@ ${DOCKER} compose build website
 
 # ── 3. 滚动重启 ──────────────────────────────
 echo "[3/4] 启动/重启容器..."
+# 先停掉本 compose project 自己的容器
+${DOCKER} compose down --remove-orphans >/dev/null 2>&1 || true
+# 兜底：清掉任何残留的同名容器（可能由旧的 docker run / 其他 project 创建，
+# 不归当前 compose project 管，compose 无法复用其名字而报冲突）
+${DOCKER} rm -f fluxdown-website >/dev/null 2>&1 || true
 ${DOCKER} compose up -d website
 
 # ── 4. 清理悬空镜像 ──────────────────────────
