@@ -7,14 +7,14 @@ on:
 
 permissions:
   contents: write
-  packages: write # 允许推送 Docker 镜像到 ghcr.io（build-server job）
+  packages: write # 允许推送 Docker 镜像到 ghcr.io（build-server-docker job）
   actions: write # 允许在 release job 末尾删除旧 artifact（避免 500MB 配额耗尽）
 
 jobs:
   # ── 前置 Job: 检测上一个版本 tag → 当前 tag 之间哪些组件目录有变更 ──
   # 规则：
   #   fluxDown/**            → 浏览器扩展（extension）
-  #   web/**、native/server/** → headless 服务器（server，Docker 镜像 + 二进制）
+  #   web/**、native/server/** → headless 服务器（server，Docker 镜像 + 多平台二进制）
   #   native/engine/**       → 桌面客户端 + 服务器（共享下载引擎）
   #   docker/**              → 服务器（部署文件变更需重发镜像）
   #   website/**             → 官网（独立走 deploy-website.yml 部署，不发 release）
@@ -942,12 +942,143 @@ jobs:
           path: build/installer/FluxDown-*-macos-${{ matrix.arch }}.tar.gz
           if-no-files-found: error
 
-  # ── 并行 Job 5: 构建 Headless 服务器（Web SPA + fluxdown-server）──
-  # 单次 Docker 构建产出两份交付物：
-  #   1. ghcr.io/<owner>/fluxdown-server 镜像（版本 tag + latest）
-  #   2. 从镜像提取二进制 + Web 静态资源打包 tar.gz（GitHub Release 资产）
-  build-server:
-    name: Build Server (Docker + linux-x64)
+  # ── 并行 Job 5a: 构建服务器 Web SPA（一次构建，供所有平台二进制包复用）──
+  build-web:
+    name: Build Server Web SPA
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.server == 'true'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install web dependencies
+        working-directory: web
+        run: bun install --frozen-lockfile
+
+      - name: Build web SPA
+        working-directory: web
+        run: bun run build
+
+      - name: Upload webroot artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-webroot
+          path: web/dist
+
+  # ── 并行 Job 5b: 构建 Headless 服务器多平台二进制（下载解压即运行）──
+  # 全部使用原生 runner，规避 ring/bundled-sqlite/zstd 等 C 依赖的交叉编译工具链问题：
+  #   linux   → musl 静态链接（零 glibc 依赖，任何发行版/NAS 直接运行）
+  #   windows → MSVC + Schannel（native-tls），无额外运行时依赖
+  #   macos   → arm64 runner 原生编译 + 交叉编译 x64（Apple SDK 双架构开箱即用）
+  # 不提供 x86(32位)：macOS/Win11 已无 32 位，Linux i686 无实际需求；
+  # 如需 armv7（老 NAS/树莓派 32 位）可后续用 cross-rs 追加 matrix 项。
+  # 打包布局：fluxdown-server(.exe) + web/（二进制默认从同级 ./web 提供 SPA，见 config.rs）
+  build-server-binaries:
+    name: Build Server (${{ matrix.platform }})
+    needs: [changes, build-web]
+    if: needs.changes.outputs.server == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - platform: windows-x64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+          - platform: windows-arm64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+          - platform: macos-x64
+            runner: macos-latest
+            target: x86_64-apple-darwin
+          - platform: macos-arm64
+            runner: macos-latest
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Get version from tag
+        id: version
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # musl-gcc：ring/bundled-sqlite/zstd 等 C 依赖静态编译所需
+      - name: Install musl toolchain (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: server-${{ matrix.platform }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            server-${{ matrix.platform }}-
+
+      - name: Build server binary
+        run: cargo build --release --locked -p fluxdown_server --target ${{ matrix.target }}
+
+      - name: Download webroot artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: server-webroot
+          path: webroot
+
+      - name: Package (tar.gz)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          VERSION=${{ steps.version.outputs.VERSION }}
+          PKG="fluxdown-server-${VERSION}-${{ matrix.platform }}"
+          mkdir -p "build/server/${PKG}" release-assets
+          cp "target/${{ matrix.target }}/release/fluxdown-server" "build/server/${PKG}/"
+          cp -r webroot "build/server/${PKG}/web"
+          tar -C build/server -czf "release-assets/FluxDown-Server-${VERSION}-${{ matrix.platform }}.tar.gz" "${PKG}"
+          ls -la release-assets/
+
+      - name: Package (zip)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $Version = "${{ steps.version.outputs.VERSION }}"
+          $Pkg = "fluxdown-server-$Version-${{ matrix.platform }}"
+          New-Item -ItemType Directory -Force -Path "build\server\$Pkg", "release-assets" | Out-Null
+          Copy-Item "target\${{ matrix.target }}\release\fluxdown-server.exe" "build\server\$Pkg\"
+          Copy-Item -Recurse "webroot" "build\server\$Pkg\web"
+          Compress-Archive -Path "build\server\$Pkg" -DestinationPath "release-assets\FluxDown-Server-$Version-${{ matrix.platform }}.zip"
+          Get-ChildItem release-assets
+
+      - name: Upload server binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-bin-${{ matrix.platform }}
+          path: release-assets/*
+
+  # ── 并行 Job 5c: Docker 镜像（linux/amd64，推 ghcr.io）──
+  # linux 二进制 tarball 已由 build-server-binaries（musl 静态链接）产出，此处只推镜像。
+  build-server-docker:
+    name: Build Server (Docker)
     runs-on: ubuntu-latest
     needs: changes
     if: needs.changes.outputs.server == 'true'
@@ -980,32 +1111,7 @@ jobs:
             type=raw,value=${{ steps.version.outputs.VERSION }}
             type=raw,value=latest
 
-      # 先 load 到本机 docker（供下一步提取二进制），层缓存走 GHA
-      - name: Build Docker image (load)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: docker/server.Dockerfile
-          load: true
-          tags: fluxdown-server:ci
-          cache-from: type=gha,scope=server
-          cache-to: type=gha,scope=server,mode=max
-
-      # 从镜像提取 /app/fluxdown-server + /app/web，打包 release 资产
-      - name: Package server tarball
-        run: |
-          VERSION=${{ steps.version.outputs.VERSION }}
-          PKG="fluxdown-server-${VERSION}-linux-x64"
-          mkdir -p "build/server/${PKG}" release-assets
-          CID=$(docker create fluxdown-server:ci)
-          docker cp "${CID}:/app/fluxdown-server" "build/server/${PKG}/"
-          docker cp "${CID}:/app/web" "build/server/${PKG}/web"
-          docker rm "$CID"
-          tar -C build/server -czf "release-assets/FluxDown-Server-${VERSION}-linux-x64.tar.gz" "${PKG}"
-          ls -la release-assets/
-
-      # 推送 ghcr.io（完全复用上一步构建缓存，秒级完成）
-      - name: Push Docker image to GHCR
+      - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -1014,12 +1120,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=server
-
-      - name: Upload server artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: server-linux-x64
-          path: release-assets/*
+          cache-to: type=gha,scope=server,mode=max
 
   # ── Release Job 1: 桌面客户端（使用推送的 v* tag，保持 GitHub latest release 语义）──
   release-app:
@@ -1253,7 +1354,7 @@ jobs:
   release-server:
     name: Release Server
     runs-on: ubuntu-latest
-    needs: build-server
+    needs: [build-server-docker, build-server-binaries]
 
     steps:
       - name: Checkout repository
@@ -1333,14 +1434,25 @@ jobs:
           echo "── Final release notes ──"
           cat RELEASE_NOTES.md
 
-      # 附加 Docker 使用说明（镜像坐标 + 快速启动）
-      - name: Append Docker usage to release notes
+      # 附加下载方式说明（直接下载二进制 + Docker）
+      - name: Append download & Docker usage to release notes
         shell: bash
         run: |
           VERSION=${{ steps.version.outputs.VERSION }}
           cat >> RELEASE_NOTES.md <<EOF
 
           ---
+
+          ## 📦 直接下载运行（免 Docker）
+
+          | 平台 | 资产 |
+          |---|---|
+          | Windows x64 / ARM64 | \`FluxDown-Server-${VERSION}-windows-{x64,arm64}.zip\` |
+          | macOS Intel / Apple Silicon | \`FluxDown-Server-${VERSION}-macos-{x64,arm64}.tar.gz\` |
+          | Linux x64 / ARM64（musl 静态链接，任意发行版可用） | \`FluxDown-Server-${VERSION}-linux-{x64,arm64}.tar.gz\` |
+
+          解压后直接运行 \`fluxdown-server\`（Windows 为 \`fluxdown-server.exe\`），浏览器访问 \`http://127.0.0.1:17800\`。
+          首次启动会在终端打印管理 token，务必保存。文件校验见 \`SHA256SUMS.txt\`。
 
           ## 🐳 Docker
 
@@ -1356,9 +1468,13 @@ jobs:
       - name: Download server artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: server-*
+          pattern: server-bin-*
           path: release-assets/
           merge-multiple: true
+
+      - name: Generate SHA256 checksums
+        working-directory: release-assets
+        run: sha256sum * > SHA256SUMS.txt
 
       - name: List release assets
         run: ls -la release-assets/
