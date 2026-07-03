@@ -355,6 +355,25 @@ class S {
   String get statusSpeedLimitHint => _t('自定义速率', 'Custom rate');
   String get speedLimitTitle => _t('全局限速', 'Global Speed Limit');
   String get speedLimitCustom => _t('自定义', 'Custom');
+  String get shutdownTriggerLabel => _t('完成后关机', 'Shutdown when done');
+  String get shutdownTitle => _t('任务完成后自动关机', 'Auto Shutdown When Done');
+  String get shutdownNeedActiveTask =>
+      _t('有任务运行中才能开启', 'Enable only while tasks are running');
+  String get shutdownDelayLabel => _t('完成后延迟', 'Delay after completion');
+  String get shutdownMinutesUnit => _t('分钟', 'min');
+  String shutdownDelayMinutes(int m) => _t('$m 分钟', '$m min');
+  String get shutdownImmediate => _t('立即', 'Immediately');
+  String get shutdownArmedHintImmediate => _t(
+    '所有任务完成后将立即关机',
+    'PC will shut down immediately after all downloads finish',
+  );
+  String shutdownArmedHint(int m) => _t(
+    '所有任务完成 $m 分钟后将自动关机',
+    'PC will shut down $m min after all downloads finish',
+  );
+  String shutdownCountdown(String time) =>
+      _t('将在 $time 后关机', 'Shutting down in $time');
+  String get shutdownCancelButton => _t('取消关机', 'Cancel Shutdown');
 
   // ─────────────────────────────────────────────
   // Settings — 分类

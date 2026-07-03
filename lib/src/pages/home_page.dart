@@ -12,6 +12,7 @@ import '../services/external_download_service.dart';
 import '../services/log_service.dart';
 import '../services/notification_service.dart';
 import '../services/power_service.dart';
+import '../services/shutdown_service.dart';
 import '../theme/app_colors.dart';
 import '../widgets/sidebar.dart';
 import '../widgets/header_bar.dart';
@@ -87,6 +88,8 @@ class _HomePageState extends State<HomePage> {
     _settingsProvider.addListener(_checkSidebarVisibility);
     // 下载期间阻止系统睡眠/息屏（按设置项）
     PowerService.instance.bind(_controller, _settingsProvider);
+    // 「任务完成后关机」服务（纯内存状态，重启不保留）
+    ShutdownService.instance.bind(_controller);
     // 首次启动 .torrent 文件关联提示（仅 Windows）
     if (Platform.isWindows) {
       _settingsProvider.addListener(_onSettingsLoadedForAssocPrompt);
@@ -110,6 +113,7 @@ class _HomePageState extends State<HomePage> {
     logInfo('HomePage', 'dispose');
     ExternalDownloadService.onNavigateToHome = null;
     PowerService.instance.unbind();
+    ShutdownService.instance.unbind();
     _clearMenuCallbacks();
     HardwareKeyboard.instance.removeHandler(_onGlobalKey);
     _settingsProvider.removeListener(_checkSidebarVisibility);

@@ -6,6 +6,7 @@ import '../models/download_task.dart';
 import '../models/settings_provider.dart';
 import '../i18n/locale_provider.dart';
 import '../theme/app_colors.dart';
+import '../services/shutdown_service.dart';
 import 'feedback_dialog.dart';
 
 // 预设限速值（label 显示用，kbs 为 KB/s）
@@ -16,6 +17,9 @@ const _kPresets = [
   (label: '2 MB/s', kbs: 2048),
   (label: '5 MB/s', kbs: 5120),
 ];
+
+// 预设关机延迟（分钟；0 = 完成后立即关机）
+const _kShutdownPresets = [0, 1, 5, 10, 30];
 
 /// 将字节/秒格式化为可读速率字符串，整数不显示小数
 String _formatSpeed(int bytes) {
@@ -44,6 +48,8 @@ class StatusBar extends StatefulWidget {
 class _StatusBarState extends State<StatusBar> {
   final _popoverController = ShadPopoverController();
   final _customController = TextEditingController();
+  final _shutdownPopoverController = ShadPopoverController();
+  final _shutdownMinutesController = TextEditingController();
 
   /// 上次已写入 settings 的字节数，用于防循环更新
   int _lastKnownBytes = -1;
@@ -54,16 +60,22 @@ class _StatusBarState extends State<StatusBar> {
     final bytes = widget.settingsProvider.speedLimitBytes;
     _lastKnownBytes = bytes;
     _customController.text = _kbsText(bytes);
+    _shutdownMinutesController.text =
+        ShutdownService.instance.delayMinutes.toString();
     widget.settingsProvider.addListener(_onSettingsChanged);
     _popoverController.addListener(_onPopoverChanged);
+    _shutdownPopoverController.addListener(_onShutdownPopoverChanged);
   }
 
   @override
   void dispose() {
     _popoverController.removeListener(_onPopoverChanged);
+    _shutdownPopoverController.removeListener(_onShutdownPopoverChanged);
     widget.settingsProvider.removeListener(_onSettingsChanged);
     _popoverController.dispose();
     _customController.dispose();
+    _shutdownPopoverController.dispose();
+    _shutdownMinutesController.dispose();
     super.dispose();
   }
 
@@ -127,6 +139,53 @@ class _StatusBarState extends State<StatusBar> {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // 完成后关机
+  // ---------------------------------------------------------------------------
+
+  /// Popover 关闭时，若已开启关机，则应用自定义分钟输入
+  void _onShutdownPopoverChanged() {
+    if (!_shutdownPopoverController.isOpen) {
+      _applyShutdownMinutesInput();
+    }
+  }
+
+  /// 切换「完成后关机」开关
+  void _toggleShutdown(bool on) {
+    final svc = ShutdownService.instance;
+    if (on) {
+      // 空/非法输入 → 保持服务当前延迟；"0" = 立即关机
+      final minutes = int.tryParse(_shutdownMinutesController.text.trim());
+      final armed = svc.arm(minutes: minutes);
+      if (armed) {
+        _shutdownMinutesController.text = svc.delayMinutes.toString();
+      }
+    } else {
+      svc.cancel();
+    }
+  }
+
+  /// 点击预设分钟：设置延迟并（可开启时）直接开启
+  void _applyShutdownPreset(int minutes) {
+    final svc = ShutdownService.instance;
+    _shutdownMinutesController.text = minutes.toString();
+    if (svc.isArmed) {
+      svc.setDelayMinutes(minutes);
+    } else {
+      svc.arm(minutes: minutes);
+    }
+  }
+
+  /// 自定义分钟输入写入服务（仅已开启时有效；0 = 立即关机）
+  void _applyShutdownMinutesInput() {
+    final svc = ShutdownService.instance;
+    final minutes = int.tryParse(_shutdownMinutesController.text.trim());
+    if (minutes != null && svc.isArmed) {
+      svc.setDelayMinutes(minutes);
+      _shutdownMinutesController.text = svc.delayMinutes.toString();
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final c = AppColors.of(context);
@@ -135,6 +194,7 @@ class _StatusBarState extends State<StatusBar> {
       listenable: Listenable.merge([
         widget.controller,
         widget.settingsProvider,
+        ShutdownService.instance,
       ]),
       builder: (context, _) {
         final dlSpeed = DownloadTask.formatBytes(
@@ -204,6 +264,20 @@ class _StatusBarState extends State<StatusBar> {
                 onToggle: _toggleLimit,
                 onApplyPreset: _applyPreset,
                 onApplyCustom: _applyCustomInput,
+                s: s,
+                c: c,
+              ),
+              const SizedBox(width: 12),
+              Container(width: 1, height: 12, color: c.border),
+              const SizedBox(width: 12),
+              // 完成后关机 Popover 触发器
+              _ShutdownTrigger(
+                popoverController: _shutdownPopoverController,
+                controller: widget.controller,
+                minutesController: _shutdownMinutesController,
+                onToggle: _toggleShutdown,
+                onApplyPreset: _applyShutdownPreset,
+                onApplyCustom: _applyShutdownMinutesInput,
                 s: s,
                 c: c,
               ),
@@ -453,6 +527,292 @@ class _SpeedLimitPopoverContent extends StatelessWidget {
                     const SizedBox(width: 6),
                     Text(
                       s.statusSpeedLimitKbs,
+                      style: TextStyle(fontSize: 12, color: c.textMuted),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// =============================================================================
+// 完成后关机 — 触发器 Widget
+// =============================================================================
+
+class _ShutdownTrigger extends StatelessWidget {
+  final ShadPopoverController popoverController;
+  final DownloadController controller;
+  final TextEditingController minutesController;
+  final ValueChanged<bool> onToggle;
+  final ValueChanged<int> onApplyPreset;
+  final VoidCallback onApplyCustom;
+  final S s;
+  final AppColors c;
+
+  const _ShutdownTrigger({
+    required this.popoverController,
+    required this.controller,
+    required this.minutesController,
+    required this.onToggle,
+    required this.onApplyPreset,
+    required this.onApplyCustom,
+    required this.s,
+    required this.c,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final svc = ShutdownService.instance;
+    final Color triggerColor;
+    final String triggerText;
+    if (svc.isCountingDown) {
+      triggerColor = c.statusWarning;
+      triggerText = s.shutdownCountdown(svc.remainingText);
+    } else if (svc.isArmed) {
+      triggerColor = c.accent;
+      triggerText = s.shutdownTriggerLabel;
+    } else {
+      triggerColor = c.textMuted;
+      triggerText = s.shutdownTriggerLabel;
+    }
+
+    return ShadPopover(
+      controller: popoverController,
+      anchor: const ShadAnchorAuto(
+        offset: Offset(0, -8),
+        followerAnchor: Alignment.bottomRight,
+        targetAnchor: Alignment.topRight,
+      ),
+      padding: EdgeInsets.zero,
+      // 监听服务与控制器 —— 倒计时秒数刷新、活跃任务数变化时开关可用性刷新
+      popover: (ctx) => ListenableBuilder(
+        listenable: Listenable.merge([svc, controller]),
+        builder: (ctx2, _) => _ShutdownPopoverContent(
+          minutesController: minutesController,
+          onToggle: onToggle,
+          onApplyPreset: onApplyPreset,
+          onApplyCustom: onApplyCustom,
+          s: s,
+          c: c,
+        ),
+      ),
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          onTap: popoverController.toggle,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(LucideIcons.power, size: 11, color: triggerColor),
+              const SizedBox(width: 4),
+              Text(
+                triggerText,
+                style: TextStyle(
+                  fontSize: 10.5,
+                  color: triggerColor,
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                ),
+              ),
+              const SizedBox(width: 2),
+              Icon(LucideIcons.chevronUp, size: 9, color: triggerColor),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// =============================================================================
+// 完成后关机 — Popover 内容：开关 + 预设延迟 + 自定义分钟 + 倒计时/取消
+// =============================================================================
+
+class _ShutdownPopoverContent extends StatelessWidget {
+  final TextEditingController minutesController;
+  final ValueChanged<bool> onToggle;
+  final ValueChanged<int> onApplyPreset;
+  final VoidCallback onApplyCustom;
+  final S s;
+  final AppColors c;
+
+  const _ShutdownPopoverContent({
+    required this.minutesController,
+    required this.onToggle,
+    required this.onApplyPreset,
+    required this.onApplyCustom,
+    required this.s,
+    required this.c,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final svc = ShutdownService.instance;
+    final canInteract = svc.canArm || svc.isArmed;
+
+    return SizedBox(
+      width: 240,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // 标题行 + 开关
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 12, 8, 10),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    s.shutdownTitle,
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w600,
+                      color: c.textPrimary,
+                    ),
+                  ),
+                ),
+                ShadSwitch(
+                  value: svc.isArmed,
+                  onChanged: canInteract ? onToggle : null,
+                  width: 34,
+                  height: 18,
+                  margin: 2,
+                ),
+              ],
+            ),
+          ),
+          // 无活跃任务提示
+          if (!canInteract)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+              child: Text(
+                s.shutdownNeedActiveTask,
+                style: TextStyle(fontSize: 11, color: c.textMuted),
+              ),
+            ),
+          // 倒计时状态 + 取消按钮
+          if (svc.isCountingDown) ...[
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+              child: Row(
+                children: [
+                  Icon(LucideIcons.timer, size: 12, color: c.statusWarning),
+                  const SizedBox(width: 5),
+                  Expanded(
+                    child: Text(
+                      s.shutdownCountdown(svc.remainingText),
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w600,
+                        color: c.statusWarning,
+                        fontFeatures: const [FontFeature.tabularFigures()],
+                      ),
+                    ),
+                  ),
+                  ShadButton.destructive(
+                    height: 24,
+                    padding: const EdgeInsets.symmetric(horizontal: 10),
+                    onPressed: svc.cancel,
+                    child: Text(
+                      s.shutdownCancelButton,
+                      style: const TextStyle(fontSize: 11),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ] else if (svc.isArmed)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+              child: Text(
+                svc.delayMinutes == 0
+                    ? s.shutdownArmedHintImmediate
+                    : s.shutdownArmedHint(svc.delayMinutes),
+                style: TextStyle(fontSize: 11, color: c.textMuted),
+              ),
+            ),
+          // 预设延迟 chips
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+            child: Wrap(
+              spacing: 5,
+              runSpacing: 5,
+              children: _kShutdownPresets.map((minutes) {
+                final isSelected =
+                    svc.isArmed && svc.delayMinutes == minutes;
+                return MouseRegion(
+                  cursor: canInteract
+                      ? SystemMouseCursors.click
+                      : SystemMouseCursors.basic,
+                  child: GestureDetector(
+                    onTap: canInteract ? () => onApplyPreset(minutes) : null,
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 120),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 4,
+                      ),
+                      decoration: BoxDecoration(
+                        color: isSelected ? c.accent : c.surface2,
+                        borderRadius: BorderRadius.circular(4),
+                        border: Border.all(
+                          color: isSelected ? c.accent : c.border,
+                          width: 0.5,
+                        ),
+                      ),
+                      child: Text(
+                        minutes == 0
+                            ? s.shutdownImmediate
+                            : s.shutdownDelayMinutes(minutes),
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: isSelected
+                              ? const Color(0xFFFFFFFF)
+                              : canInteract
+                                  ? c.textSecondary
+                                  : c.textDisabled,
+                          fontFeatures: const [FontFeature.tabularFigures()],
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              }).toList(),
+            ),
+          ),
+          // 分割线
+          Divider(color: c.border, height: 1),
+          // 自定义分钟输入
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  s.shutdownDelayLabel,
+                  style: TextStyle(fontSize: 11, color: c.textMuted),
+                ),
+                const SizedBox(height: 6),
+                Row(
+                  children: [
+                    Expanded(
+                      child: ShadInput(
+                        controller: minutesController,
+                        enabled: canInteract,
+                        keyboardType: TextInputType.number,
+                        inputFormatters: [
+                          FilteringTextInputFormatter.digitsOnly,
+                        ],
+                        onSubmitted: (_) => onApplyCustom(),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      s.shutdownMinutesUnit,
                       style: TextStyle(fontSize: 12, color: c.textMuted),
                     ),
                   ],
