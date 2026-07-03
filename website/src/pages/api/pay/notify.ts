@@ -52,7 +52,12 @@ export const POST: APIRoute = async ({ request }) => {
   }
 
   if (params.status === "paid" && params.out_trade_no) {
-    markPaid(params.out_trade_no);
+    // `amount` is integer cents per the gateway contract.
+    const amountCents = Math.round(Number(params.amount));
+    markPaid(
+      params.out_trade_no,
+      Number.isFinite(amountCents) && amountCents > 0 ? amountCents : 0,
+    );
   }
 
   // Acknowledge any verified callback so the gateway stops retrying.

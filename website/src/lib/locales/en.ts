@@ -690,6 +690,13 @@ const en = {
   "sponsor.pay.timeout": "Payment timed out. Please try again.",
   "sponsor.pay.unavailable": "Payment is temporarily unavailable.",
   "sponsor.pay.retry": "Retry",
+  "sponsor.wall.namePlaceholder": "Your name (optional, shown on the sponsor wall)",
+  "sponsor.wall.messagePlaceholder": "Message (optional)",
+  "sponsor.wall.hint":
+    "After payment, your name and message are automatically added to the GitHub sponsor wall. Leave blank to sponsor anonymously.",
+  "sponsor.wall.link": "View sponsor wall",
+  "sponsor.wall.thanksNote": "Your message will appear on the sponsor wall shortly.",
+  "sponsor.list.title": "Recent Sponsors",
 
   // Project Board
   "board.tabLabel": "Issue Tracker",

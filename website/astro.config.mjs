@@ -67,6 +67,19 @@ export default defineConfig({
         optional: true,
       }),
 
+      // ── 赞助名录（Sponsor Wall）──
+      // 支付成功后自动把赞助者名称/留言评论到公开仓库的置顶 issue
+      SPONSOR_WALL_REPO: envField.string({
+        context: "server",
+        access: "secret",
+        default: "zerx-lab/FluxDown",
+      }),
+      SPONSOR_WALL_ISSUE: envField.number({
+        context: "server",
+        access: "secret",
+        default: 3,
+      }),
+
       // ── 可选：自由付款支付网关（zerx pay）──
       PAY_GATEWAY_URL: envField.string({
         context: "server",

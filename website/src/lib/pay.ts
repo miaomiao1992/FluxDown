@@ -165,28 +165,67 @@ export function verifyNotifySign(params: Record<string, string>): boolean {
 // no persistence required for a thank-you screen.
 
 const PAID_TTL = 30 * 60 * 1000; // 30 minutes
-const paidOrders = new Map<string, number>(); // outTradeNo -> expiry ms
+
+interface PaidOrder {
+  expiry: number;
+  amountCents: number; // 0 when the callback carried no usable amount
+  wallPosted: boolean; // sponsor-wall comment already created
+}
+
+const paidOrders = new Map<string, PaidOrder>(); // outTradeNo -> record
 
 function sweepPaid(now: number): void {
-  for (const [k, exp] of paidOrders) {
-    if (exp <= now) paidOrders.delete(k);
+  for (const [k, entry] of paidOrders) {
+    if (entry.expiry <= now) paidOrders.delete(k);
   }
 }
 
+function livePaid(outTradeNo: string): PaidOrder | null {
+  const entry = paidOrders.get(outTradeNo);
+  if (!entry) return null;
+  if (entry.expiry <= Date.now()) {
+    paidOrders.delete(outTradeNo);
+    return null;
+  }
+  return entry;
+}
+
 /** Mark an order paid (called from the verified notify handler). */
-export function markPaid(outTradeNo: string): void {
+export function markPaid(outTradeNo: string, amountCents = 0): void {
   const now = Date.now();
   sweepPaid(now);
-  paidOrders.set(outTradeNo, now + PAID_TTL);
+  const prev = paidOrders.get(outTradeNo);
+  paidOrders.set(outTradeNo, {
+    expiry: now + PAID_TTL,
+    amountCents: amountCents > 0 ? amountCents : (prev?.amountCents ?? 0),
+    wallPosted: prev?.wallPosted ?? false,
+  });
 }
 
 /** Returns true if the order was marked paid and is still within TTL. */
 export function isPaid(outTradeNo: string): boolean {
-  const exp = paidOrders.get(outTradeNo);
-  if (exp === undefined) return false;
-  if (exp <= Date.now()) {
-    paidOrders.delete(outTradeNo);
-    return false;
-  }
+  return livePaid(outTradeNo) !== null;
+}
+
+/** Paid amount in cents, or null when unknown / expired / unpaid. */
+export function paidAmountCents(outTradeNo: string): number | null {
+  const entry = livePaid(outTradeNo);
+  return entry && entry.amountCents > 0 ? entry.amountCents : null;
+}
+
+/**
+ * One-shot claim so a paid order posts to the sponsor wall at most once.
+ * Returns false when the order is not paid or was already claimed.
+ */
+export function claimWallPost(outTradeNo: string): boolean {
+  const entry = livePaid(outTradeNo);
+  if (!entry || entry.wallPosted) return false;
+  entry.wallPosted = true;
   return true;
+}
+
+/** Undo a wall-post claim after a failed GitHub call so retry works. */
+export function releaseWallPost(outTradeNo: string): void {
+  const entry = livePaid(outTradeNo);
+  if (entry) entry.wallPosted = false;
 }

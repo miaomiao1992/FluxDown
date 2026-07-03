@@ -42,6 +42,38 @@ type PayState =
 const POLL_INTERVAL = 2500;
 const POLL_TIMEOUT = 5 * 60 * 1000; // 5 minutes
 
+// Public sponsor-wall issue (comments = wall entries).
+const SPONSOR_WALL_URL = "https://github.com/zerx-lab/FluxDown/issues/3";
+
+interface WallSponsor {
+  name: string;
+  avatar: string | null;
+  amountCents: number;
+  date: string;
+}
+
+// Deterministic fallback tile color for sponsors without an avatar.
+const AVATAR_COLORS = [
+  "bg-pink-500/20 text-pink-300",
+  "bg-sky-500/20 text-sky-300",
+  "bg-emerald-500/20 text-emerald-300",
+  "bg-amber-500/20 text-amber-300",
+  "bg-violet-500/20 text-violet-300",
+];
+
+function avatarColor(name: string): string {
+  let h = 0;
+  for (let i = 0; i < name.length; i += 1) {
+    h = (h * 31 + name.charCodeAt(i)) >>> 0;
+  }
+  return AVATAR_COLORS[h % AVATAR_COLORS.length]!;
+}
+
+function fmtCents(cents: number): string {
+  const yuan = cents / 100;
+  return Number.isInteger(yuan) ? `¥${yuan}` : `¥${yuan.toFixed(2)}`;
+}
+
 export default function SponsorSection({
   fullPage = false,
 }: SponsorSectionProps) {
@@ -49,7 +81,32 @@ export default function SponsorSection({
 
   const [selected, setSelected] = useState<number>(PRESET_AMOUNTS[1]!);
   const [custom, setCustom] = useState<string>("");
+  const [name, setName] = useState<string>("");
+  const [message, setMessage] = useState<string>("");
+  const [wallQueued, setWallQueued] = useState(false);
   const [pay, setPay] = useState<PayState>({ phase: "idle" });
+
+  // Mirror name/message into a ref so the long-lived poll closure
+  // reads the latest values without re-arming timers.
+  const wallInfo = useRef({ name: "", message: "" });
+  useEffect(() => {
+    wallInfo.current = { name, message };
+  }, [name, message]);
+
+  // Latest sponsors from the GitHub wall (amount desc, then newest).
+  const [sponsors, setSponsors] = useState<WallSponsor[]>([]);
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/sponsor/list")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d: { sponsors?: WallSponsor[] } | null) => {
+        if (alive && Array.isArray(d?.sponsors)) setSponsors(d.sponsors);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   // Effective amount in yuan (custom overrides preset when valid).
   const customNum = parseFloat(custom);
@@ -71,6 +128,20 @@ export default function SponsorSection({
 
   useEffect(() => () => stopPolling(), [stopPolling]);
 
+  // Post name/message to the sponsor wall once payment is confirmed.
+  // Fire-and-forget: the thank-you screen must not block on GitHub.
+  const submitWall = useCallback((outTradeNo: string) => {
+    const n = wallInfo.current.name.trim();
+    const m = wallInfo.current.message.trim();
+    if (!n && !m) return;
+    setWallQueued(true);
+    void fetch("/api/sponsor/wall", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ outTradeNo, name: n, message: m }),
+    }).catch(() => {});
+  }, []);
+
   const poll = useCallback(
     (outTradeNo: string) => {
       const tick = async () => {
@@ -87,6 +158,7 @@ export default function SponsorSection({
             const data = (await res.json()) as { paid?: boolean };
             if (data.paid) {
               stopPolling();
+              submitWall(outTradeNo);
               setPay({ phase: "paid" });
               return;
             }
@@ -98,11 +170,12 @@ export default function SponsorSection({
       };
       pollTimer.current = setTimeout(tick, POLL_INTERVAL);
     },
-    [stopPolling, t],
+    [stopPolling, submitWall, t],
   );
 
   const startPayment = useCallback(async () => {
     if (!amountValid) return;
+    setWallQueued(false);
     setPay({ phase: "creating" });
     try {
       const res = await fetch("/api/pay/create", {
@@ -243,6 +316,37 @@ export default function SponsorSection({
             />
           </div>
 
+          {/* Sponsor wall: optional name + message */}
+          <div className="space-y-3 mb-6">
+            <input
+              type="text"
+              maxLength={30}
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder={t("sponsor.wall.namePlaceholder")}
+              className="w-full px-4 py-3 rounded-xl border border-dark-border/50 bg-dark-surface2/40 text-dark-text text-sm placeholder:text-dark-text-muted focus:outline-none focus:border-brand-sky/60 focus:ring-1 focus:ring-brand-sky/30 transition-all duration-200"
+            />
+            <textarea
+              rows={2}
+              maxLength={300}
+              value={message}
+              onChange={(e) => setMessage(e.target.value)}
+              placeholder={t("sponsor.wall.messagePlaceholder")}
+              className="w-full px-4 py-3 rounded-xl border border-dark-border/50 bg-dark-surface2/40 text-dark-text text-sm placeholder:text-dark-text-muted focus:outline-none focus:border-brand-sky/60 focus:ring-1 focus:ring-brand-sky/30 transition-all duration-200 resize-none"
+            />
+            <p className="text-xs text-dark-text-muted leading-relaxed">
+              {t("sponsor.wall.hint")}{" "}
+              <a
+                href={SPONSOR_WALL_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-brand-sky hover:underline"
+              >
+                {t("sponsor.wall.link")}
+              </a>
+            </p>
+          </div>
+
           {/* Pay button */}
           <button
             type="button"
@@ -265,6 +369,66 @@ export default function SponsorSection({
             {t("sponsor.ctaHint")}
           </p>
         </motion.div>
+
+        {/* ── Latest sponsors (from the GitHub wall) ─────── */}
+        {sponsors.length > 0 && (
+          <motion.div
+            className="mt-10"
+            initial={{ opacity: 0, y: 20 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true, amount: 0.2 }}
+            transition={{ duration: 0.5, delay: 0.15 }}
+          >
+            <h3 className="text-center text-sm font-semibold text-dark-text mb-4">
+              {t("sponsor.list.title")}
+            </h3>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {sponsors.map((s, i) => (
+                <div
+                  key={`${s.name}-${s.date}-${i}`}
+                  className="flex items-center gap-3 px-3.5 py-2.5 rounded-xl border border-dark-border/40 bg-dark-surface1/40"
+                >
+                  {s.avatar ? (
+                    <img
+                      src={s.avatar}
+                      alt=""
+                      loading="lazy"
+                      referrerPolicy="no-referrer"
+                      className="w-8 h-8 rounded-full object-cover shrink-0"
+                    />
+                  ) : (
+                    <span
+                      className={`w-8 h-8 rounded-full shrink-0 inline-flex items-center justify-center text-xs font-semibold ${avatarColor(s.name)}`}
+                    >
+                      {s.name.slice(0, 1).toUpperCase()}
+                    </span>
+                  )}
+                  <span
+                    className="flex-1 min-w-0 truncate text-sm text-dark-text-secondary"
+                    title={s.name}
+                  >
+                    {s.name}
+                  </span>
+                  {s.amountCents > 0 && (
+                    <span className="shrink-0 text-xs font-semibold text-pink-400">
+                      {fmtCents(s.amountCents)}
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+            <p className="mt-4 text-center">
+              <a
+                href={SPONSOR_WALL_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-xs text-brand-sky hover:underline"
+              >
+                {t("sponsor.wall.link")} →
+              </a>
+            </p>
+          </motion.div>
+        )}
       </div>
 
       {/* ── Payment modal (QR + status) ──────────────────── */}
@@ -348,6 +512,19 @@ export default function SponsorSection({
                   <p className="text-sm text-dark-text-secondary">
                     {t("sponsor.pay.thanksBody")}
                   </p>
+                  {wallQueued && (
+                    <p className="mt-2 text-xs text-dark-text-muted">
+                      {t("sponsor.wall.thanksNote")}
+                    </p>
+                  )}
+                  <a
+                    href={SPONSOR_WALL_URL}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="mt-4 inline-flex items-center gap-1 text-xs text-brand-sky hover:underline"
+                  >
+                    {t("sponsor.wall.link")} →
+                  </a>
                 </div>
               )}
 

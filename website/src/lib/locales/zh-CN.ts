@@ -642,6 +642,13 @@ const zhCN: Messages = {
   "sponsor.pay.timeout": "支付超时，请重试。",
   "sponsor.pay.unavailable": "支付功能暂时不可用。",
   "sponsor.pay.retry": "重试",
+  "sponsor.wall.namePlaceholder": "您的名称（选填，将展示在赞助名录）",
+  "sponsor.wall.messagePlaceholder": "留言（选填）",
+  "sponsor.wall.hint":
+    "支付成功后，名称与留言将自动登记到 GitHub 赞助名录；留空则匿名赞助。",
+  "sponsor.wall.link": "查看赞助名录",
+  "sponsor.wall.thanksNote": "您的留言将很快出现在赞助名录中。",
+  "sponsor.list.title": "最新赞助",
 
   // Footer
   "footer.desc":
