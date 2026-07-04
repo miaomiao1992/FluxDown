@@ -30,6 +30,7 @@ jobs:
       extension: ${{ steps.detect.outputs.extension }}
       server: ${{ steps.detect.outputs.server }}
       mobile: ${{ steps.detect.outputs.mobile }}
+      cli: ${{ steps.detect.outputs.cli }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -46,10 +47,10 @@ jobs:
           # 自动忽略 release 流程创建的 extension-v* / website-v* 组件 tag）
           PREV=$(git describe --tags --abbrev=0 --match 'v[0-9]*' "${TAG}^" 2>/dev/null || true)
 
-          APP=false; EXTENSION=false; SERVER=false; MOBILE=false
+          APP=false; EXTENSION=false; SERVER=false; MOBILE=false; CLI=false
           if [ -z "$PREV" ]; then
             echo "No previous version tag found — building everything"
-            APP=true; EXTENSION=true; SERVER=true; MOBILE=true
+            APP=true; EXTENSION=true; SERVER=true; MOBILE=true; CLI=true
           else
             echo "Diff range: ${PREV}..${TAG}"
             CHANGED=$(git diff --name-only "${PREV}" "${TAG}")
@@ -61,7 +62,9 @@ jobs:
                 fluxDown/*)          EXTENSION=true ;;
                 web/*)               SERVER=true ;;
                 native/server/*)     SERVER=true ;;
-                native/engine/*)     APP=true; SERVER=true; MOBILE=true ;;
+                native/cli/*)        CLI=true ;;
+                native/api/*)        SERVER=true; CLI=true ;;
+                native/engine/*)     APP=true; SERVER=true; MOBILE=true; CLI=true ;;
                 docker/*)            SERVER=true ;;
                 android/*)           MOBILE=true ;;
                 lib/src/mobile/*)    MOBILE=true ;;
@@ -80,8 +83,9 @@ jobs:
             echo "extension=$EXTENSION"
             echo "server=$SERVER"
             echo "mobile=$MOBILE"
+            echo "cli=$CLI"
           } >> "$GITHUB_OUTPUT"
-          echo "::notice::Components changed in ${PREV:-<none>}..${TAG}: app=$APP extension=$EXTENSION server=$SERVER mobile=$MOBILE"
+          echo "::notice::Components changed in ${PREV:-<none>}..${TAG}: app=$APP extension=$EXTENSION server=$SERVER mobile=$MOBILE cli=$CLI"
 
   # ── 并行 Job 1: 构建 Windows 安装包（x64 + ARM64）──
   build-windows:
@@ -1220,6 +1224,101 @@ jobs:
           name: server-bin-${{ matrix.platform }}
           path: release-assets/*
 
+  # ── 并行 Job: 构建 CLI 二进制（fluxdown，6 平台）──
+  # 与 build-server-binaries 同套 runner/target 策略（全原生 runner 规避 C 依赖交叉编译）：
+  #   linux   → musl 静态链接（零 glibc 依赖）
+  #   windows → MSVC + Schannel（native-tls）
+  #   macos   → 各架构原生 runner 编译
+  # CLI 是单二进制（无 webroot），产物即 fluxdown(.exe)。
+  build-cli-binaries:
+    name: Build CLI (${{ matrix.platform }})
+    needs: changes
+    if: needs.changes.outputs.cli == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - platform: windows-x64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+          - platform: windows-arm64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+          - platform: macos-x64
+            runner: macos-latest
+            target: x86_64-apple-darwin
+          - platform: macos-arm64
+            runner: macos-latest
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Get version from tag
+        id: version
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # musl-gcc：ring 等 C 依赖静态编译所需
+      - name: Install musl toolchain (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cli-${{ matrix.platform }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cli-${{ matrix.platform }}-
+
+      - name: Build CLI binary
+        run: cargo build --release --locked -p fluxdown_cli --target ${{ matrix.target }}
+
+      - name: Package (tar.gz)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          VERSION=${{ steps.version.outputs.VERSION }}
+          PKG="fluxdown-cli-${VERSION}-${{ matrix.platform }}"
+          mkdir -p "build/cli/${PKG}" release-assets
+          cp "target/${{ matrix.target }}/release/fluxdown" "build/cli/${PKG}/"
+          tar -C build/cli -czf "release-assets/FluxDown-CLI-${VERSION}-${{ matrix.platform }}.tar.gz" "${PKG}"
+          ls -la release-assets/
+
+      - name: Package (zip)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $Version = "${{ steps.version.outputs.VERSION }}"
+          $Pkg = "fluxdown-cli-$Version-${{ matrix.platform }}"
+          New-Item -ItemType Directory -Force -Path "build\cli\$Pkg", "release-assets" | Out-Null
+          Copy-Item "target\${{ matrix.target }}\release\fluxdown.exe" "build\cli\$Pkg\"
+          Compress-Archive -Path "build\cli\$Pkg" -DestinationPath "release-assets\FluxDown-CLI-$Version-${{ matrix.platform }}.zip"
+          Get-ChildItem release-assets
+
+      - name: Upload CLI binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-bin-${{ matrix.platform }}
+          path: release-assets/*
+
   # ── 并行 Job 5c: Docker 镜像（linux/amd64，推 ghcr.io）──
   # linux 二进制 tarball 已由 build-server-binaries（musl 静态链接）产出，此处只推镜像。
   build-server-docker:
@@ -1645,6 +1744,155 @@ jobs:
           draft: false
           make_latest: "false"
 
+  # ── Release Job: CLI（独立 tag cli-v*，不抢占 latest）──
+  release-cli:
+    name: Release CLI
+    runs-on: ubuntu-latest
+    needs: build-cli-binaries
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Get version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      # 只收集 CLI 相关目录的 commit 作为 release notes
+      - name: Generate release notes with git-cliff
+        uses: orhun/git-cliff-action@v4
+        with:
+          args: --latest --strip header --include-path "native/cli/**" --include-path "native/api/**" --include-path "native/engine/**"
+        env:
+          OUTPUT: RELEASE_NOTES.md
+          GITHUB_REPO: ${{ github.repository }}
+
+      # 兜底 + 备份原始 notes 供翻译失败时回退
+      - name: Finalize release notes
+        id: finalize
+        shell: bash
+        run: |
+          HAS_NOTES=true
+          if [ ! -s RELEASE_NOTES.md ]; then
+            echo "FluxDown CLI Release v${{ steps.version.outputs.VERSION }}" > RELEASE_NOTES.md
+            HAS_NOTES=false
+          fi
+          cp RELEASE_NOTES.md RELEASE_NOTES.orig.md
+          echo "has_notes=$HAS_NOTES" >> "$GITHUB_OUTPUT"
+          echo "── Release notes (git-cliff) ──"
+          cat RELEASE_NOTES.md
+
+      # ── 将混合语言的 cliff 输出翻译为中英双语（与 release-app 同一套规则，直接调用 CLI）──
+      - name: Translate release notes (bilingual)
+        if: steps.finalize.outputs.has_notes == 'true'
+        continue-on-error: true
+        shell: bash
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          TRANSLATE_PROMPT: |
+            RELEASE_NOTES.md 是 git-cliff 从 Conventional Commits 生成的更新日志，条目语言混杂（部分中文、部分英文）。
+            请将其改写为中英双语版本，并覆盖写回 RELEASE_NOTES.md。
+
+            输出文件格式（严格遵守，无代码块围栏、无任何额外说明文字）：
+
+            <!-- fluxdown:lang:zh -->
+            （完整中文版）
+
+            <!-- fluxdown:lang:en -->
+            （完整英文版）
+
+            规则：
+            - 两个区块的结构与原文件一一对应：保留 "## [x.y.z] - 日期" 版本标题、"### <emoji> 分组" 标题、"- *(scope)* 描述" 条目格式与条目顺序，emoji 原样保留
+            - 中文区块：分组标题与所有条目描述均为中文（如 "### 🚀 新功能"、"### 🐛 问题修复"）
+            - 英文区块：分组标题与所有条目描述均为英文（如 "### 🚀 Features"、"### 🐛 Bug Fixes"）
+            - *(scope)* 括号内的 scope 名、反引号内的代码、issue/PR 编号（#123）、专有名词（HLS、DASH、aria2、Docker、WebSocket 等）原样保留，不翻译
+            - 只修改 RELEASE_NOTES.md，不改动其他任何文件
+        run: |
+          npm install -g @anthropic-ai/claude-code
+          claude -p "$TRANSLATE_PROMPT" --allowedTools "Read,Write,Edit"
+
+      # 校验翻译结果：缺少双语标记则回退到原始 git-cliff 输出
+      - name: Validate translated notes
+        if: steps.finalize.outputs.has_notes == 'true'
+        shell: bash
+        run: |
+          if grep -q '<!-- fluxdown:lang:zh -->' RELEASE_NOTES.md \
+            && grep -q '<!-- fluxdown:lang:en -->' RELEASE_NOTES.md; then
+            echo "Bilingual translation OK"
+          else
+            echo "::warning::Translated notes missing language markers — falling back to original git-cliff output"
+            cp RELEASE_NOTES.orig.md RELEASE_NOTES.md
+          fi
+          rm -f RELEASE_NOTES.orig.md
+          echo "── Final release notes ──"
+          cat RELEASE_NOTES.md
+
+      # 附加下载 & 安装说明
+      - name: Append download & install usage to release notes
+        shell: bash
+        run: |
+          VERSION=${{ steps.version.outputs.VERSION }}
+          cat >> RELEASE_NOTES.md <<EOF
+
+          ---
+
+          ## 📦 下载预编译二进制
+
+          | 平台 | 资产 |
+          |---|---|
+          | Windows x64 / ARM64 | \`FluxDown-CLI-${VERSION}-windows-{x64,arm64}.zip\` |
+          | macOS Intel / Apple Silicon | \`FluxDown-CLI-${VERSION}-macos-{x64,arm64}.tar.gz\` |
+          | Linux x64 / ARM64（musl 静态链接，任意发行版可用） | \`FluxDown-CLI-${VERSION}-linux-{x64,arm64}.tar.gz\` |
+
+          解压后得到 \`fluxdown\`（Windows 为 \`fluxdown.exe\`），放入 PATH 即可使用。文件校验见 \`SHA256SUMS.txt\`。
+
+          ## 🛠️ 从源码安装
+
+          \`\`\`bash
+          cargo install --git https://github.com/${{ github.repository }} fluxdown_cli
+          \`\`\`
+
+          ## 🚀 快速开始
+
+          \`\`\`bash
+          fluxdown ping                         # 探活（需 FluxDown App / server 运行中）
+          fluxdown add https://example.com/f.zip
+          fluxdown ls
+          \`\`\`
+
+          服务地址经 \`--url\` 或 \`FLUXDOWN_URL\`（默认 \`http://127.0.0.1:17800\`），
+          管理 token 经 \`--token\` 或 \`FLUXDOWN_TOKEN\`。
+          EOF
+
+      - name: Download CLI artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: cli-bin-*
+          path: release-assets/
+          merge-multiple: true
+
+      - name: Generate SHA256 checksums
+        working-directory: release-assets
+        run: sha256sum * > SHA256SUMS.txt
+
+      - name: List release assets
+        run: ls -la release-assets/
+
+      # make_latest=false：组件 release 不抢占 GitHub /releases/latest
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: cli-v${{ steps.version.outputs.VERSION }}
+          name: FluxDown CLI v${{ steps.version.outputs.VERSION }}
+          files: release-assets/*
+          body_path: RELEASE_NOTES.md
+          generate_release_notes: false
+          draft: false
+          make_latest: "false"
+
   # ── Release Job 4: 移动端（独立 tag mobile-v*，不抢占 latest）──
   release-mobile:
     name: Release Mobile
@@ -1764,7 +2012,7 @@ jobs:
   cleanup-artifacts:
     name: Cleanup CI Artifacts
     runs-on: ubuntu-latest
-    needs: [release-app, release-extension, release-server, release-mobile]
+    needs: [release-app, release-extension, release-server, release-mobile, release-cli]
     if: ${{ always() && !cancelled() }}
 
     steps:

@@ -64,9 +64,11 @@ interface FilteredRelease {
   assets: ReleaseAsset[];
 }
 
-/** 将 tag 转为可比较的版本数组，如 "v0.0.3" → [0, 0, 3] */
+/** 将 tag 转为可比较的版本数组，如 "v0.0.3" / "cli-v0.0.3" → [0, 0, 3] */
 function parseVersion(tag: string): number[] {
   return tag
+    // 去掉组件前缀（cli- / mobile- / server- / extension- / website-）再去掉 v
+    .replace(/^(cli|mobile|server|extension|website)-/, "")
     .replace(/^v/, "")
     .split(".")
     .map((s) => {

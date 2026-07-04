@@ -14,6 +14,8 @@ import {
   Package,
   MonitorDown,
   Cpu,
+  Terminal,
+  Smartphone,
 } from "lucide-react";
 import { useLocale } from "@/lib/i18n";
 
@@ -48,6 +50,28 @@ function inferAssetMeta(name: string): {
   icon: React.ReactNode;
 } {
   const lower = name.toLowerCase();
+
+  // CLI（独立 cli-v* release，命名 FluxDown-CLI-<ver>-<os>-<arch>.<ext>）
+  if (lower.startsWith("fluxdown-cli-")) {
+    const platMatch = lower.match(
+      /-(windows|linux|macos)-(x64|arm64)\.(zip|tar\.gz)$/,
+    );
+    const sub = platMatch ? `${platMatch[1]} ${platMatch[2]}` : "命令行工具";
+    return {
+      label: "CLI",
+      sub,
+      icon: <Terminal className="w-3.5 h-3.5" />,
+    };
+  }
+  // Android（独立 mobile-v* release，命名 FluxDown-<ver>-android-<abi>.apk）
+  if (lower.includes("-android-") && lower.endsWith(".apk")) {
+    const abiMatch = lower.match(/-android-([a-z0-9_-]+)\.apk$/);
+    return {
+      label: "Android",
+      sub: abiMatch ? `${abiMatch[1]} APK` : "APK",
+      icon: <Smartphone className="w-3.5 h-3.5" />,
+    };
+  }
 
   // Windows
   if (
@@ -206,6 +230,8 @@ const PLATFORM_ORDER: Record<string, number> = {
   macOS: 1,
   Linux: 2,
   扩展: 3,
+  Android: 4,
+  CLI: 5,
   其他: 99,
 };
 

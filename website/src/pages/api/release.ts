@@ -27,7 +27,9 @@
  *     version: "0.1.51",
  *     tag: "server-v0.1.51",
  *     assets: { windows_x64, windows_arm64, linux_x64, linux_arm64, macos_x64, macos_arm64 }
- *   } | null   // FluxDown Server（headless Web 版），无对应 release 时为 null
+ *   } | null,  // FluxDown Server（headless Web 版），无对应 release 时为 null
+ *   cli: { version, tag, assets:{ windows_x64, windows_arm64, linux_x64, linux_arm64, macos_x64, macos_arm64 } } | null,
+ *   mobile: { version, tag, assets:{ android_arm64, android_armv7, android_x64, android_universal } } | null
  * }
  */
 
@@ -369,6 +371,20 @@ export const GET: APIRoute = async () => {
         r.assets.some((a) => a.name.startsWith("FluxDown-Server-")),
     );
 
+    // FluxDown CLI release：独立 cli-v* release（命令行客户端 fluxdown）
+    const cliRelease = published.find(
+      (r) =>
+        /^cli-v\d+\.\d+\.\d+$/.test(r.tag_name) &&
+        r.assets.some((a) => a.name.startsWith("FluxDown-CLI-")),
+    );
+
+    // FluxDown 移动端 release：独立 mobile-v* release（Android APK）
+    const mobileRelease = published.find(
+      (r) =>
+        /^mobile-v\d+\.\d+\.\d+$/.test(r.tag_name) &&
+        r.assets.some((a) => a.name.includes("-android-")),
+    );
+
     // 匹配资产文件（兼容旧命名：-windows-setup.exe / 新命名：-windows-x64-setup.exe）
     const setupAsset = latest.assets.find(
       (a) =>
@@ -432,6 +448,26 @@ export const GET: APIRoute = async () => {
     const serverLinuxArm64Asset = findServerAsset("-linux-arm64.tar.gz");
     const serverMacosX64Asset = findServerAsset("-macos-x64.tar.gz");
     const serverMacosArm64Asset = findServerAsset("-macos-arm64.tar.gz");
+    // FluxDown CLI 资产（命名：FluxDown-CLI-<ver>-<os>-<arch>.<ext>）
+    const findCliAsset = (suffix: string) =>
+      cliRelease?.assets.find(
+        (a) => a.name.startsWith("FluxDown-CLI-") && a.name.endsWith(suffix),
+      );
+    const cliWindowsX64Asset = findCliAsset("-windows-x64.zip");
+    const cliWindowsArm64Asset = findCliAsset("-windows-arm64.zip");
+    const cliLinuxX64Asset = findCliAsset("-linux-x64.tar.gz");
+    const cliLinuxArm64Asset = findCliAsset("-linux-arm64.tar.gz");
+    const cliMacosX64Asset = findCliAsset("-macos-x64.tar.gz");
+    const cliMacosArm64Asset = findCliAsset("-macos-arm64.tar.gz");
+    // 移动端 Android 资产（命名：FluxDown-<ver>-android-<abi>.apk）
+    const findMobileAsset = (suffix: string) =>
+      mobileRelease?.assets.find(
+        (a) => a.name.includes("-android-") && a.name.endsWith(suffix),
+      );
+    const mobileArm64Asset = findMobileAsset("-android-arm64-v8a.apk");
+    const mobileArmv7Asset = findMobileAsset("-android-armeabi-v7a.apk");
+    const mobileX64Asset = findMobileAsset("-android-x86_64.apk");
+    const mobileUniversalAsset = findMobileAsset("-android-universal.apk");
 
     const formatAsset = (asset: GitHubAsset | undefined, tag?: string) => {
       if (!asset) return null;
@@ -515,6 +551,38 @@ export const GET: APIRoute = async () => {
               macos_arm64: formatAsset(
                 serverMacosArm64Asset,
                 serverRelease.tag_name,
+              ),
+            },
+          }
+        : null,
+      cli: cliRelease
+        ? {
+            version: cliRelease.tag_name.replace(/^cli-v/, ""),
+            tag: cliRelease.tag_name,
+            assets: {
+              windows_x64: formatAsset(cliWindowsX64Asset, cliRelease.tag_name),
+              windows_arm64: formatAsset(
+                cliWindowsArm64Asset,
+                cliRelease.tag_name,
+              ),
+              linux_x64: formatAsset(cliLinuxX64Asset, cliRelease.tag_name),
+              linux_arm64: formatAsset(cliLinuxArm64Asset, cliRelease.tag_name),
+              macos_x64: formatAsset(cliMacosX64Asset, cliRelease.tag_name),
+              macos_arm64: formatAsset(cliMacosArm64Asset, cliRelease.tag_name),
+            },
+          }
+        : null,
+      mobile: mobileRelease
+        ? {
+            version: mobileRelease.tag_name.replace(/^mobile-v/, ""),
+            tag: mobileRelease.tag_name,
+            assets: {
+              android_arm64: formatAsset(mobileArm64Asset, mobileRelease.tag_name),
+              android_armv7: formatAsset(mobileArmv7Asset, mobileRelease.tag_name),
+              android_x64: formatAsset(mobileX64Asset, mobileRelease.tag_name),
+              android_universal: formatAsset(
+                mobileUniversalAsset,
+                mobileRelease.tag_name,
               ),
             },
           }

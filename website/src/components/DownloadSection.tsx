@@ -12,10 +12,15 @@ import {
   AlertCircle,
   AlertTriangle,
   Globe,
-  Smartphone,
   Copy,
+  Terminal,
 } from "lucide-react";
-import { SiApple, SiLinux, SiDocker } from "@icons-pack/react-simple-icons";
+import {
+  SiApple,
+  SiLinux,
+  SiDocker,
+  SiAndroid,
+} from "@icons-pack/react-simple-icons";
 import { LampEffect } from "@/components/ui/lamp-effect";
 import { useLocale } from "@/lib/i18n";
 
@@ -96,6 +101,30 @@ interface ReleaseInfo {
       linux_arm64: ReleaseAsset | null;
       macos_x64: ReleaseAsset | null;
       macos_arm64: ReleaseAsset | null;
+    };
+  } | null;
+  /** FluxDown CLI（命令行客户端）独立 release，无发布时为 null */
+  cli: {
+    version: string;
+    tag: string;
+    assets: {
+      windows_x64: ReleaseAsset | null;
+      windows_arm64: ReleaseAsset | null;
+      linux_x64: ReleaseAsset | null;
+      linux_arm64: ReleaseAsset | null;
+      macos_x64: ReleaseAsset | null;
+      macos_arm64: ReleaseAsset | null;
+    };
+  } | null;
+  /** FluxDown 移动端（Android）独立 release，无发布时为 null */
+  mobile: {
+    version: string;
+    tag: string;
+    assets: {
+      android_arm64: ReleaseAsset | null;
+      android_armv7: ReleaseAsset | null;
+      android_x64: ReleaseAsset | null;
+      android_universal: ReleaseAsset | null;
     };
   } | null;
 }
@@ -196,6 +225,24 @@ export default function DownloadSection() {
       serverAssets.linux_arm64 ||
       serverAssets.macos_x64 ||
       serverAssets.macos_arm64)
+  );
+  const cliAssets = release?.cli?.assets;
+  const hasCliAssets = !!(
+    cliAssets &&
+    (cliAssets.windows_x64 ||
+      cliAssets.windows_arm64 ||
+      cliAssets.linux_x64 ||
+      cliAssets.linux_arm64 ||
+      cliAssets.macos_x64 ||
+      cliAssets.macos_arm64)
+  );
+  const mobileAssets = release?.mobile?.assets;
+  const hasMobileAssets = !!(
+    mobileAssets &&
+    (mobileAssets.android_arm64 ||
+      mobileAssets.android_armv7 ||
+      mobileAssets.android_x64 ||
+      mobileAssets.android_universal)
   );
 
   const platforms: {
@@ -368,13 +415,66 @@ export default function DownloadSection() {
     {
       key: "mobile",
       name: t("dl.mobile"),
-      icon: Smartphone,
-      arch: "Android / iOS",
-      available: false,
+      icon: SiAndroid,
+      arch: "Android",
+      available: hasMobileAssets,
       primary: false,
-      badge: t("dl.comingSoon"),
-      setup: null,
+      badge: hasMobileAssets ? t("dl.availableNow") : t("dl.comingSoon"),
+      iconBg: "bg-gradient-to-br from-[#3DDC84] to-[#2bb673]",
+      version: release?.mobile?.version,
+      setup: mobileAssets?.android_arm64 ?? null,
+      setupLabel: "arm64-v8a (APK)",
       portable: null,
+      packages: [
+        {
+          label: "armeabi-v7a (APK)",
+          asset: mobileAssets?.android_armv7 ?? null,
+        },
+        {
+          label: "x86_64 (APK)",
+          asset: mobileAssets?.android_x64 ?? null,
+        },
+        {
+          label: `universal (APK)`,
+          asset: mobileAssets?.android_universal ?? null,
+        },
+      ],
+    },
+    {
+      key: "cli",
+      name: t("dl.cli"),
+      icon: Terminal,
+      arch: t("dl.cliArch"),
+      available: hasCliAssets,
+      primary: false,
+      badge: hasCliAssets ? t("dl.availableNow") : t("dl.comingSoon"),
+      iconBg: "bg-gradient-to-br from-brand-cyan to-brand-sky",
+      version: release?.cli?.version,
+      setup: cliAssets?.windows_x64 ?? null,
+      setupLabel: "Windows x64",
+      portable: null,
+      packages: [
+        {
+          label: "Windows ARM64 (zip)",
+          asset: cliAssets?.windows_arm64 ?? null,
+        },
+        {
+          label: "Linux x64 (tar.gz)",
+          asset: cliAssets?.linux_x64 ?? null,
+        },
+        {
+          label: "Linux ARM64 (tar.gz)",
+          asset: cliAssets?.linux_arm64 ?? null,
+        },
+        {
+          label: "macOS Apple Silicon (tar.gz)",
+          asset: cliAssets?.macos_arm64 ?? null,
+        },
+        {
+          label: "macOS Intel (tar.gz)",
+          asset: cliAssets?.macos_x64 ?? null,
+        },
+      ],
     },
   ];
 
@@ -648,6 +748,16 @@ export default function DownloadSection() {
                           className="inline-flex items-center justify-center gap-1 mt-1 text-[10px] text-dark-text-muted hover:text-brand-blue underline underline-offset-2 transition-colors"
                         >
                           {t("dl.webGuide")}
+                        </a>
+                      )}
+
+                      {/* CLI 文档链接 */}
+                      {p.key === "cli" && (
+                        <a
+                          href={`/docs/${locale}/api/cli/`}
+                          className="inline-flex items-center justify-center gap-1 mt-1 text-[10px] text-dark-text-muted hover:text-brand-blue underline underline-offset-2 transition-colors"
+                        >
+                          {t("dl.cliGuide")}
                         </a>
                       )}
                     </div>
