@@ -1,5 +1,6 @@
 mod actors;
 mod api_host;
+mod compat_flags;
 mod file_association;
 mod logger;
 mod native_messaging;

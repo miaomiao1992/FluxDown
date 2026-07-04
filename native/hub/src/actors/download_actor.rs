@@ -560,6 +560,12 @@ pub async fn run(db_dir: PathBuf) {
         }
     });
 
+    // Self-heal a spurious RUNASADMIN compatibility flag on our own exe (idempotent).
+    // PCA/installer-detection may have flagged an older build lacking the asInvoker
+    // manifest; that makes CreateProcess-based launches (e.g. the installer's [Run]
+    // step) fail with error 740. Clearing it here fixes already-installed machines.
+    tokio::task::spawn_blocking(crate::compat_flags::clear_runasadmin_self);
+
     // Auto-register NMH (Native Messaging Host) for browser extension communication.
     // Only re-registers when the registry is missing, incomplete, or stale (exe path changed).
     tokio::task::spawn_blocking(|| {
