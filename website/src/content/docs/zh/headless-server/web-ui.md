@@ -2,7 +2,7 @@
 title: Web 界面
 description: 用服务器自带的浏览器界面登录并管理下载。
 section: headless-server
-order: 2
+order: 3
 sourceHash: "50cbeb4cbb24"
 ---
 

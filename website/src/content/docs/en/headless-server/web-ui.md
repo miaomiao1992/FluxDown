@@ -2,7 +2,7 @@
 title: Web UI
 description: Sign in and manage downloads from the browser-based interface bundled with the headless server.
 section: headless-server
-order: 2
+order: 3
 ---
 
 Once the server is running (see [Server Setup](/docs/en/headless-server/setup/)), open its address in a browser — for example `http://<host>:17800/` — to reach the Web UI. It mirrors the desktop app's task management workflow, adapted for remote, multi-session use.
