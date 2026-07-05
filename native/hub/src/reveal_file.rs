@@ -1,12 +1,11 @@
 /// 在系统/用户指定的文件管理器中打开目录或定位文件。
 ///
 /// 调用方传入：
-/// - `path`        — 文件或目录的绝对路径（自动检测类型）
-/// - `file_tpl`    — 用户自定义"定位文件"命令模板，空表示使用平台默认
-/// - `dir_tpl`     — 用户自定义"打开目录"命令模板，空表示使用平台默认
+/// - `path` — 文件或目录的绝对路径（自动检测类型）
+/// - `tpl`  — 用户自定义文件管理器命令模板，空表示使用平台默认
 ///
-/// 模板占位符：
-/// - `{path}` — 完整文件路径（仅 reveal-file 场景有意义）
+/// 模板占位符（文件/目录共用同一条命令）：
+/// - `{path}` — 当前路径：文件场景 = 文件完整路径，目录场景 = 目录路径
 /// - `{dir}`  — 目录路径（文件 → 父目录，目录 → 自身）
 ///
 /// 占位符在替换时会做平台 shell 转义，用户无需在模板中再加引号。
@@ -17,7 +16,7 @@
 /// | Windows | 第三方默认 FM→打开父目录，否则 `explorer.exe /select,"path"`     | `cmd /c start "" "dir"`       |
 /// | macOS   | `open -R path`                                         | `open path`                   |
 /// | Linux   | D-Bus `FileManager1.ShowItems`，失败 fallback xdg-open | `xdg-open dir`                |
-pub fn reveal(path: &str, file_tpl: &str, dir_tpl: &str) {
+pub fn reveal(path: &str, tpl: &str) {
     use std::path::Path;
 
     // 判定 file/dir：路径若不存在则按"末段是否含 . "猜测，与 Dart 端旧逻辑一致。
@@ -40,8 +39,7 @@ pub fn reveal(path: &str, file_tpl: &str, dir_tpl: &str) {
         path.to_string()
     };
 
-    // 优先走用户自定义模板
-    let tpl = if is_file { file_tpl } else { dir_tpl };
+    // 优先走用户自定义模板（文件/目录共用一条，占位符 {path} 已按场景填好）
     if !tpl.trim().is_empty() {
         if run_template(tpl, path, &dir) {
             return;
@@ -69,6 +67,18 @@ pub fn reveal(path: &str, file_tpl: &str, dir_tpl: &str) {
 // 平台 shell 转义，用户在模板里写 `nautilus --select {path}` 即可，不需要
 // 自己包引号。
 
+/// 构造传给 `cmd.exe /c` 的参数：把整条用户命令再包一层最外层引号。
+///
+/// 必不可少。当 `cmdline` 以引号开头且含超过两个引号时（可执行文件装在含
+/// 空格的目录，如 `C:\Program Files\...`，叠加被 shell_quote 包裹的
+/// `{path}`/`{dir}`），`cmd /c` 会剥掉命令行的首尾引号，把 exe 路径从空格
+/// 处截断（报 `'C:\Program' is not recognized`）。外层引号确保 cmd 剥掉的
+/// 是这一层，还原出完整的用户命令。规则见 `cmd /?`。
+#[cfg(target_os = "windows")]
+fn windows_cmd_c_arg(cmdline: &str) -> String {
+    format!("/c \"{cmdline}\"")
+}
+
 fn run_template(tpl: &str, path: &str, dir: &str) -> bool {
     let cmdline = substitute(tpl, path, dir);
     crate::logger::log_info!("[reveal] running custom: {cmdline}");
@@ -76,10 +86,10 @@ fn run_template(tpl: &str, path: &str, dir: &str) -> bool {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
-        // raw_arg 把 `/c <cmdline>` 整段原样塞进 CreateProcessW，
-        // 避免 Rust 的参数转义改写用户写好的引号。
+        // 见 windows_cmd_c_arg：整条命令须再包一层外层引号，否则 cmd /c
+        // 会剥掉用户命令的首尾引号（exe 装在含空格目录时把路径截断）。
         match std::process::Command::new("cmd.exe")
-            .raw_arg(format!("/c {cmdline}"))
+            .raw_arg(windows_cmd_c_arg(&cmdline))
             .spawn()
         {
             Ok(_) => true,
@@ -413,5 +423,19 @@ mod exe_basename_tests {
             exe_basename("C:\\Tools\\FM.EXE /x"),
             Some("FM.EXE".to_string())
         );
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod cmd_arg_tests {
+    use super::windows_cmd_c_arg;
+
+    #[test]
+    fn wraps_whole_command_in_outer_quotes() {
+        let got = windows_cmd_c_arg(r#""C:\Program Files\app\a.exe" /x "C:\d ir""#);
+        assert_eq!(got, r#"/c ""C:\Program Files\app\a.exe" /x "C:\d ir"""#);
+        // 首尾必须是引号：cmd /c 剥掉这层后还原出用户的完整命令。
+        assert!(got.starts_with("/c \""));
+        assert!(got.ends_with('"'));
     }
 }

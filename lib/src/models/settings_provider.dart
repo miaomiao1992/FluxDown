@@ -128,7 +128,6 @@ class SettingsProvider extends ChangeNotifier {
   // 文件管理器自定义命令模板（空 = 用平台默认行为）
   // {path} = 完整文件路径；{dir} = 目录路径；占位符在 Rust 端做 shell 转义
   String _revealFileCmd = '';
-  String _openDirCmd = '';
 
   /// 配置是否已从 Rust 端加载完成
   bool _loaded = false;
@@ -316,7 +315,6 @@ class SettingsProvider extends ChangeNotifier {
 
   // 文件管理器命令 Getters
   String get revealFileCmd => _revealFileCmd;
-  String get openDirCmd => _openDirCmd;
 
   // ---------------------------------------------------------------------------
   // Setters — 修改值 + 通知 Rust 持久化
@@ -911,13 +909,6 @@ class SettingsProvider extends ChangeNotifier {
     _saveToRust('reveal_file_cmd', value);
   }
 
-  void setOpenDirCmd(String value) {
-    if (_openDirCmd == value) return;
-    _openDirCmd = value;
-    notifyListeners();
-    _saveToRust('open_dir_cmd', value);
-  }
-
   // 文件关联操作
 
   /// 标记已弹窗提示过文件关联（持久化到 Rust SQLite）
@@ -1064,6 +1055,7 @@ class SettingsProvider extends ChangeNotifier {
   void _onConfigLoaded(RustSignalPack<ConfigLoaded> pack) {
     final entries = pack.message.entries;
     logInfo('Settings', '_onConfigLoaded: ${entries.length} entries');
+    String legacyOpenDirCmd = '';
     for (final entry in entries) {
       logInfo('Settings', '  config: ${entry.key}=${_truncateForLog(entry.value)}');
       switch (entry.key) {
@@ -1187,7 +1179,7 @@ class SettingsProvider extends ChangeNotifier {
         case 'reveal_file_cmd':
           _revealFileCmd = entry.value;
         case 'open_dir_cmd':
-          _openDirCmd = entry.value;
+          legacyOpenDirCmd = entry.value;
         case 'show_sidebar_status':
           _showSidebarStatus = entry.value != 'false';
         case 'show_sidebar_queues':
@@ -1209,6 +1201,12 @@ class SettingsProvider extends ChangeNotifier {
         case 'custom_categories':
           _customCategories = CustomCategory.decodeList(entry.value);
       }
+    }
+    // 迁移：旧版拆分的"打开目录"命令并入统一的文件管理器命令
+    //（reveal_file_cmd 为空时才搬，保留用户已设的定位命令优先）。
+    if (_revealFileCmd.isEmpty && legacyOpenDirCmd.isNotEmpty) {
+      _revealFileCmd = legacyOpenDirCmd;
+      _saveToRust('reveal_file_cmd', legacyOpenDirCmd);
     }
     _loaded = true;
     notifyListeners();

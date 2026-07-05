@@ -733,21 +733,14 @@ class S {
   // 文件管理器自定义命令
   String get fileManagerSection => _t('文件管理器', 'File Manager');
   String get revealFileCmdLabel =>
-      _t('"在文件夹中显示"命令', '"Show in Folder" command');
+      _t('文件管理器命令', 'File manager command');
   String get revealFileCmdDesc => _t(
-    '用于定位下载文件的第三方命令模板。占位符 {path} = 文件路径，{dir} = 父目录。留空则使用平台默认（Windows 资源管理器 / Finder / Nautilus 等）。',
-    'Custom command to reveal a downloaded file. Placeholders: {path} = file path, {dir} = parent dir. Leave empty to use the platform default (Explorer / Finder / Nautilus, etc.).',
+    '打开文件/目录时调用的第三方文件管理器命令模板。占位符 {path} = 当前路径（下载完成的文件用完整文件路径，多数管理器会定位并选中该文件；打开目录时为目录路径），{dir} = 目录（文件时为父目录）。留空则使用平台默认（Windows 资源管理器 / Finder / Nautilus 等）。',
+    'Third-party file manager command used to open files/folders. Placeholders: {path} = current path (a downloaded file uses its full path — most managers locate and select it; for a directory it is the folder path), {dir} = directory (parent dir for files). Leave empty to use the platform default (Explorer / Finder / Nautilus, etc.).',
   );
-  String get revealFileCmdPlaceholder =>
-      _t('例如：nautilus --select {path}', 'e.g. nautilus --select {path}');
-  String get openDirCmdLabel => _t('"打开目录"命令', '"Open Folder" command');
-  String get openDirCmdDesc => _t(
-    '用于打开目录的第三方命令模板。占位符 {dir} = 目录路径。留空则使用平台默认。',
-    'Custom command to open a folder. Placeholder: {dir} = folder path. Leave empty to use the platform default.',
-  );
-  String get openDirCmdPlaceholder => _t(
-    '例如："C:\\TC\\TOTALCMD64.EXE" /O /T /L={dir}',
-    r'e.g. "C:\TC\TOTALCMD64.EXE" /O /T /L={dir}',
+  String get revealFileCmdPlaceholder => _t(
+    r'例如："C:\Program Files\GPSoftware\Directory Opus\dopusrt.exe" /cmd Go {path} NEW',
+    r'e.g. "C:\Program Files\GPSoftware\Directory Opus\dopusrt.exe" /cmd Go {path} NEW',
   );
   List<String> get searchKeywordsFileManager => _t(
     '文件管理器,资源管理器,Explorer,Finder,Nautilus,Total Commander,文件夹',
@@ -1214,6 +1207,11 @@ class S {
   String get feedbackContactHint => _t(
     '填写邮箱可收到反馈进度通知，其他联系方式可能无法收到通知',
     'Enter your email to receive progress notifications. Other contact methods may not receive notifications.',
+  );
+  String get feedbackAttachLogs => _t('附带今日日志', 'Attach today\'s logs');
+  String get feedbackAttachLogsHint => _t(
+    '发送时附带当天日志（已脱敏），有助于我们更快定位问题',
+    'Include today\'s logs (sanitized) to help us diagnose the issue faster',
   );
   String get feedbackOptional => _t('可选', 'Optional');
   String get feedbackSubmit => _t('提交', 'Submit');

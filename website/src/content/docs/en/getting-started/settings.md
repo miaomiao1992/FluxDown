@@ -46,8 +46,7 @@ Open **Settings** from the top bar's gear icon. The settings sidebar has eight c
 | Auto-retry Attempts | Automatic retries after transient errors like network drops (-1 = unlimited, 0 = off). | 3 |
 | Retry Interval | Seconds to wait before each automatic retry. | 5 |
 | User-Agent | The browser identity sent with download requests; presets for Chrome/Firefox/Edge/Safari, plus a `netdisk` preset required for Baidu Pan direct links. Empty uses the built-in Chrome UA. | Empty (built-in Chrome UA) |
-| "Show in Folder" command | Custom command template to reveal a file (`{path}`/`{dir}` placeholders). Empty uses the platform default (Explorer/Finder/Nautilus). | Empty |
-| "Open Folder" command | Custom command template to open a folder (`{dir}` placeholder). Empty uses the platform default. | Empty |
+| File manager command | Custom command template for opening a file or folder in a third-party manager. Placeholders: `{path}` (current path) and `{dir}` (folder). Empty uses the platform default (Explorer/Finder/Nautilus). | Empty |
 | Default Queue | Which queue new downloads join when none is explicitly chosen (used by the browser extension too). Only shown once you've created a named queue. | Default Queue |
 
 ### Third-party file managers
@@ -58,19 +57,19 @@ Open **Settings** from the top bar's gear icon. The settings sidebar has eight c
 - **macOS** — uses the Launch Services default for `public.folder`.
 - **Linux** — uses the `inode/directory` default from `mimeapps.list` (via `xdg-open`).
 
-To use a manager that is **not** your system default, or to highlight the exact file inside a third-party manager, fill in the **"Show in Folder" command** / **"Open Folder" command** templates above. Placeholders are replaced with the target path and are already shell-quoted, so don't add your own quotes:
+To use a manager that is **not** your system default — or to highlight the exact file inside a third-party manager — fill in the **File manager command** template above. One command covers both "Show in Folder" (a downloaded file) and "Open Folder" (a directory); FluxDown fills the placeholders according to the case. Placeholders are **already shell-quoted, so don't add your own quotes** around them — but the executable path still needs quotes if it contains spaces:
 
-- `{path}` — the full file path (for "Show in Folder").
-- `{dir}` — the folder (the file's parent for "Show in Folder", the folder itself for "Open Folder").
+- `{path}` — the current path: the full file path when showing a file, the folder path when opening a directory.
+- `{dir}` — the directory (the file's parent when showing a file, the folder itself when opening a directory).
 
-Example "Show in Folder" commands on Windows (adjust the install path, and use each manager's own command-line options to select a file):
+Example commands on Windows (adjust the install path; use `{path}` for managers that can navigate to a specific file, `{dir}` for those that only open a folder):
 
 | Manager | Command |
 |---|---|
-| OneCommander | `"C:\Program Files\OneCommander\OneCommander.exe" "{path}"` |
-| Everything | `"C:\Program Files\Everything\Everything.exe" -select "{path}"` |
-| Directory Opus | `"C:\Program Files\GPSoftware\Directory Opus\dopusrt.exe" /cmd Go "{path}" NEW` |
-| Total Commander | `"C:\totalcmd\TOTALCMD64.EXE" /O /T "{dir}"` |
+| OneCommander | `"C:\Program Files\OneCommander\OneCommander.exe" {path}` |
+| Everything | `"C:\Program Files\Everything\Everything.exe" -select {path}` |
+| Directory Opus | `"C:\Program Files\GPSoftware\Directory Opus\dopusrt.exe" /cmd Go {path} NEW` |
+| Total Commander | `"C:\totalcmd\TOTALCMD64.EXE" /O /T {dir}` |
 
 A configured template always takes priority over auto-detection; if it fails to launch, FluxDown falls back to the platform default.
 
