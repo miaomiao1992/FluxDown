@@ -5,8 +5,11 @@
  * 服务端持有 GITHUB_TOKEN，前端无需暴露凭据。
  *
  * 下载量计算：
- *   total_downloads = GitHub 所有 release 的 asset download_count 之和
- *   （分页拉取全部 release，即覆盖所有时间的全量真实下载数据）。
+ *   total_downloads = 历史基础下载量 + GitHub 当前仓库所有 release 的 asset download_count 之和。
+ *   历史基础量（DOWNLOADS_BASELINE）来自不再统计的旧渠道：
+ *     - 已归档旧仓库 zerx-lab/fluxdown-archive 全量 release 下载：55,318
+ *     - Cloudflare R2 flux-down 桶下载（B 类操作累计 GET）：58,320
+ *   两者相加固定为 113,638，叠加当前仓库分页拉取的全量真实下载数据。
  *
  * 返回格式:
  * {
@@ -37,6 +40,12 @@ export const prerender = false;
 // ── 缓存：避免每次请求都打 GitHub API（12 小时）──
 let cache: { data: unknown; timestamp: number } | null = null;
 const CACHE_TTL = 12 * 60 * 60 * 1000;
+
+// ── 历史基础下载量 ──
+// 已归档旧仓库 zerx-lab/fluxdown-archive（55,318）+ 已停用的 Cloudflare R2
+// flux-down 桶累计下载（B 类 GET 操作 58,320）。两个旧渠道均不再产生新增量，
+// 因此作为固定基数叠加到当前仓库的动态下载量之上。
+const DOWNLOADS_BASELINE = 55_318 + 58_320;
 
 interface GitHubAsset {
   name: string;
@@ -265,8 +274,9 @@ export const GET: APIRoute = async () => {
     };
 
     // ── 下载量计算 ──
-    // 累计所有 release 的 asset download_count（GitHub 全量真实下载数据）
-    let totalDownloads = 0;
+    // 历史基础量（旧仓库 + R2，见 DOWNLOADS_BASELINE）叠加当前仓库
+    // 所有 release 的 asset download_count（GitHub 全量真实下载数据）。
+    let totalDownloads = DOWNLOADS_BASELINE;
     for (const release of releases) {
       for (const asset of release.assets) {
         totalDownloads += asset.download_count;
