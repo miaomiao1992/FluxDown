@@ -1292,8 +1292,11 @@ pub fn rescue_stranded_staging_files(
         // ------------------------------------------------------------------
         // Fast path: an entry whose name exactly matches current_file_name
         // (= resolved_name written to DB in Phase 3 / Phase 3.5).
-        // This is the normal case: single-file torrent or a multi-file
-        // torrent whose top-level directory name equals the torrent name.
+        // Fires mainly for single-file torrents. Multi-file torrents stage each
+        // file at its own relative path (the torrent-name container exists only
+        // in save_dir, created by the completion move), so they normally take the
+        // fallback path below — an entry matches here only when the torrent has
+        // an inner directory named like its root.
         // Mirrors the `stage_item.exists()` branch in bt_download_inner.
         // ------------------------------------------------------------------
         let preferred = entries
@@ -2596,8 +2599,12 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
     } else {
         // Use a task-scoped staging directory so that concurrent BT tasks
         // with identical torrent names never collide on disk.
-        // librqbit will write to  save_dir/.bt_stage_<task_id>/<resolved_name>
-        // and we move the result to the final deduplicated path after download.
+        // Because output_folder is set explicitly (sub_folder = None), librqbit
+        // writes each file flat at  save_dir/.bt_stage_<task_id>/<relative_path>
+        // — it does NOT prepend the torrent-name folder (that default applies
+        // only when output_folder is None; see librqbit session.rs). The
+        // torrent-name container is recreated by compute_completion_layout when
+        // moving the result to its final deduplicated path after download.
         let stage_dir = bt_stage_dir(&save_dir, &task_id);
         // Create the staging directory now (before librqbit does) so we can
         // immediately mark it hidden.  librqbit uses `overwrite: true` and
