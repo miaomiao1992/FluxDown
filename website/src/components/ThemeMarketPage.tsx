@@ -337,7 +337,6 @@ export default function ThemeMarketPage() {
     setLightbox({ theme, index: i });
   }, []);
 
-  const repoUrl = REPO_URL;
 
   return (
     <section className="pt-24 sm:pt-32 pb-16 sm:pb-20">
@@ -394,7 +393,7 @@ export default function ThemeMarketPage() {
               />
             </div>
             <a
-              href={repoUrl}
+              href={`${REPO_URL}?tab=contributing-ov-file`}
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-1.5 rounded-full border border-dark-border bg-dark-surface1/50 px-4 py-2 text-xs font-medium text-dark-text-secondary hover:text-dark-text hover:border-dark-text-muted/40 transition-colors backdrop-blur-sm"
