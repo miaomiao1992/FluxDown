@@ -975,6 +975,136 @@ export default defineBackground(() => {
   const hasDeterminingFilename = !!browser.downloads.onDeterminingFilename;
 
   // ──────────────────────────────────────────────────────────────
+  // Firefox 专用：blocking webRequest 从源头拦截下载（issue #21）
+  // ──────────────────────────────────────────────────────────────
+  // Firefox 无 onDeterminingFilename，只能靠 onCreated 兜底层在下载项已创建后
+  // cancel+erase。但 Firefox 的 downloads.erase 对主动取消的记录删除不可靠，
+  // 导致库/下载窗口残留一条"已取消"记录。
+  //
+  // 根治：Firefox MV3 仍支持 blocking webRequest。对判定为下载的导航响应
+  // 直接返回 {cancel:true}，浏览器根本不创建下载项 → 无任何残留记录。
+  // 同步做拦截决策，异步 fire-and-forget 发送到 FluxDown（不阻塞响应管线）。
+  //
+  // 仅在 Firefox（无 onDeterminingFilename）启用；Chrome MV3 无 blocking
+  // webRequest，且 onDeterminingFilename 的 suggest+cancel 已是干净路径。
+  if (!hasDeterminingFilename) {
+    const onDownloadHeadersBlocking = (
+      details: any,
+    ): { cancel: boolean } | undefined => {
+      // 只拦截导航类请求（点击下载链接 / 导航转下载）；xhr/fetch 取 blob 不碰
+      if (details.type !== "main_frame" && details.type !== "sub_frame") {
+        return undefined;
+      }
+      if (!details.responseHeaders) return undefined;
+      // 仅成功响应（重定向/错误交给浏览器）
+      if (details.statusCode < 200 || details.statusCode >= 300) {
+        return undefined;
+      }
+
+      let contentType = "";
+      let contentLength = -1;
+      let contentDisposition = "";
+      for (const h of details.responseHeaders) {
+        const name = h.name.toLowerCase();
+        if (name === "content-type" && h.value) {
+          contentType = h.value.split(";")[0].trim().toLowerCase();
+        } else if (name === "content-length" && h.value) {
+          const parsed = parseInt(h.value, 10);
+          if (!isNaN(parsed)) contentLength = parsed;
+        } else if (name === "content-disposition" && h.value) {
+          contentDisposition = h.value;
+        }
+      }
+
+      const isAttachment = contentDisposition
+        .toLowerCase()
+        .startsWith("attachment");
+      const isDownloadMime = isDownloadContentType(contentType);
+      if (!isAttachment && !isDownloadMime) return undefined;
+
+      // 冷启动首个下载时 settings 缓存可能为 null：保守放行，异步预热缓存
+      const settings = _settingsCache;
+      if (!settings) {
+        getCachedSettings().catch(() => {});
+        return undefined;
+      }
+      if (!settings.enabled) return undefined;
+
+      if (hasActiveBypass(details.url)) return undefined;
+      // App 熔断期内放行浏览器原生下载，避免用户完全无法下载
+      if (isAppKnownDown()) return undefined;
+
+      const dispositionFilename =
+        parseContentDispositionFilename(contentDisposition);
+      const itemInfo: DownloadItemInfo = {
+        url: details.url,
+        fileSize: contentLength > 0 ? contentLength : undefined,
+        mime: contentType || undefined,
+        filename: dispositionFilename || undefined,
+      };
+      if (!shouldIntercept(itemInfo, settings)) return undefined;
+
+      // 命中：同步取消该请求（浏览器不创建下载项），异步发送到 FluxDown
+      console.log("[FluxDown] Firefox blocking intercept (cancel at source):", {
+        url: details.url,
+        contentType,
+        contentLength,
+        dispositionFilename,
+      });
+
+      const cleanFilename = extractCleanFilename(itemInfo.filename, details.url);
+      const referrer =
+        (details as { originUrl?: string }).originUrl ||
+        (details as { documentUrl?: string }).documentUrl ||
+        undefined;
+      // fire-and-forget：blocking 回调必须尽快返回；发送失败时回退浏览器下载
+      sendToFluxDown(
+        details.url,
+        referrer,
+        cleanFilename,
+        itemInfo.fileSize,
+        itemInfo.mime,
+      )
+        .then((ok) => {
+          if (!ok) {
+            console.warn(
+              "[FluxDown] Firefox blocking: send failed, falling back to browser download:",
+              details.url,
+            );
+            return fallbackAfterSendFailure(details.url, cleanFilename);
+          }
+        })
+        .catch((e) => {
+          console.error(
+            "[FluxDown] Firefox blocking: sendToFluxDown threw:",
+            e,
+          );
+          return fallbackAfterSendFailure(details.url, cleanFilename).catch(
+            () => {},
+          );
+        });
+
+      return { cancel: true };
+    };
+
+    try {
+      browser.webRequest.onHeadersReceived.addListener(
+        onDownloadHeadersBlocking as any,
+        { urls: ["<all_urls>"], types: ["main_frame", "sub_frame"] },
+        ["blocking", "responseHeaders"] as any,
+      );
+      console.log(
+        "[FluxDown] Firefox blocking download interceptor registered",
+      );
+    } catch (e) {
+      console.warn(
+        "[FluxDown] Failed to register Firefox blocking interceptor:",
+        e,
+      );
+    }
+  }
+
+  // ──────────────────────────────────────────────────────────────
   // 弱网可靠性：统一等待元数据就绪
   // ──────────────────────────────────────────────────────────────
   // 设计原则：
@@ -1307,15 +1437,9 @@ export default defineBackground(() => {
 
     const cleanFilename = extractCleanFilename(itemInfo.filename, url);
 
-    // 先取消浏览器下载，防止双下载
-    await Promise.allSettled([
-      browser.downloads.cancel(downloadId).catch((e) => {
-        console.warn("[FluxDown] Fallback: failed to cancel download:", e);
-      }),
-      browser.downloads.erase({ id: downloadId }).catch((e) => {
-        console.warn("[FluxDown] Fallback: failed to erase download:", e);
-      }),
-    ]);
+    // 取消浏览器下载并抹除记录，防止双下载 + 残留失败/已取消记录（见 issue #21）。
+    // 详见 cancelAndErase：Firefox 需等记录落终态再 erase 并重试确认。
+    await cancelAndErase(downloadId);
 
     // 再发送到 FluxDown
     let sendOk = false;
@@ -2502,6 +2626,57 @@ export default defineBackground(() => {
 
   function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * 健壮地取消并抹除一条浏览器下载记录（Firefox 关键路径，见 issue #21）。
+   *
+   * Firefox 的 downloads.cancel() 返回的 Promise 会在状态真正落到 interrupted
+   * 之前 resolve，此时立刻 erase 常常删不掉记录，浏览器下载器残留一条"已取消"
+   * 记录。正确做法：cancel 后轮询 search 等记录进入终态（interrupted/complete）
+   * 再 erase，并在 erase 后确认记录确实消失，未消失则重试。
+   */
+  async function cancelAndErase(downloadId: number): Promise<void> {
+    try {
+      await browser.downloads.cancel(downloadId);
+    } catch (e) {
+      console.warn("[FluxDown] cancelAndErase: cancel failed:", e);
+    }
+
+    // 等记录落到终态（interrupted/complete），最多等 ~1s；
+    // 记录已消失（length===0）说明已被抹除，直接返回。
+    const settleDeadline = Date.now() + 1000;
+    while (Date.now() < settleDeadline) {
+      try {
+        const results = await browser.downloads.search({ id: downloadId });
+        if (!results || results.length === 0) return;
+        const state = (results[0] as any).state;
+        if (state === "interrupted" || state === "complete") break;
+      } catch {
+        break;
+      }
+      await sleep(50);
+    }
+
+    // erase 并确认删除，未删掉则重试（Firefox 偶发时序松弛）
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        await browser.downloads.erase({ id: downloadId });
+      } catch (e) {
+        console.warn("[FluxDown] cancelAndErase: erase failed:", e);
+      }
+      try {
+        const remain = await browser.downloads.search({ id: downloadId });
+        if (!remain || remain.length === 0) return;
+      } catch {
+        return;
+      }
+      await sleep(100);
+    }
+    console.warn(
+      "[FluxDown] cancelAndErase: record still present after retries:",
+      downloadId,
+    );
   }
 
   /**
