@@ -14,6 +14,9 @@ const docsFallbackPathnames = getFallbackPathnames();
 // 避免与主内容页争夺抓取预算(与 Layout noindex prop 保持一致)。
 const noindexPathnames = new Set(["/qq-group", "/telegram-group"]);
 
+// 构建时刻(ISO8601),用作 sitemap lastmod —— 每次部署刷新站点 freshness 信号。
+const BUILD_TIME = new Date().toISOString();
+
 // https://astro.com/docs/en/guides/environment-variables/
 export default defineConfig({
   site: "https://fluxdown.zerx.dev",
@@ -24,6 +27,17 @@ export default defineConfig({
       filter: (page) => {
         const path = new URL(page).pathname.replace(/\/$/, "");
         return !docsFallbackPathnames.has(path) && !noindexPathnames.has(path);
+      },
+      // Bing/IndexNow 依赖 ISO8601 lastmod 做 freshness 判定。SSG 页无天然 mtime,
+      // 用构建时刻统一标注(每次部署刷新,反映站点最近更新)。changefreq/priority
+      // 作为辅助信号:首页最高,其余默认。
+      serialize: (item) => {
+        item.lastmod = BUILD_TIME;
+        if (new URL(item.url).pathname === "/") {
+          item.changefreq = "weekly";
+          item.priority = 1.0;
+        }
+        return item;
       },
     }),
   ],
