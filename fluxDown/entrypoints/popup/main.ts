@@ -15,6 +15,7 @@
 import { initI18n, applyI18nToDOM, t, getLocale, saveLocale } from '@/utils/i18n';
 import { checkFluxDownAvailable } from '@/utils/native-messaging';
 import { loadSettings, saveSettings } from '@/utils/settings';
+import { remotePing } from '@/utils/remote-server';
 
 const $ = <T extends HTMLElement>(sel: string) => document.querySelector<T>(sel)!;
 
@@ -27,6 +28,14 @@ const dotVisibleToggle = $<HTMLInputElement>('#dotVisibleToggle');
 const interceptModeSelect = $<HTMLSelectElement>('#interceptModeSelect');
 const modeHint = $('#modeHint')!;
 const minSizeSelect = $<HTMLSelectElement>('#minSizeSelect');
+
+// 远程下载源
+const remoteModeSelect = $<HTMLSelectElement>('#remoteModeSelect');
+const remoteModeHint = $('#remoteModeHint')!;
+const remoteUrlInput = $<HTMLInputElement>('#remoteUrlInput');
+const remoteTokenInput = $<HTMLInputElement>('#remoteTokenInput');
+const remoteTestBtn = $<HTMLButtonElement>('#remoteTestBtn');
+const remoteTestResult = $('#remoteTestResult')!;
 const themeBtn = $<HTMLButtonElement>('#themeBtn');
 const langBtn = $<HTMLButtonElement>('#langBtn');
 const langLabel = langBtn.querySelector('.lang-label')!;
@@ -227,6 +236,12 @@ async function init() {
   minSizeSelect.value = String(settings.minFileSize);
   renderDomainList(settings.excludeDomains || []);
 
+  // 远程下载源设置
+  remoteModeSelect.value = settings.remoteMode || 'off';
+  updateRemoteModeHint(settings.remoteMode || 'off');
+  remoteUrlInput.value = settings.remoteUrl || '';
+  remoteTokenInput.value = settings.remoteToken || '';
+
   // 悬浮球可见状态（未设置时默认显示）
   const dotVisResult = await browser.storage.local.get('fluxdown_dot_visible') ?? {};
   dotVisibleToggle.checked = dotVisResult['fluxdown_dot_visible'] !== false;
@@ -249,6 +264,30 @@ const MODE_HINT_KEYS: Record<string, ModeKey> = {
 function updateModeHint(mode: string) {
   const key = MODE_HINT_KEYS[mode];
   modeHint.textContent = key ? t(key) : '';
+}
+
+type RemoteModeHintKey =
+  | 'remote.modeHintOff'
+  | 'remote.modeHintFallback'
+  | 'remote.modeHintAlways';
+
+const REMOTE_MODE_HINT_KEYS: Record<string, RemoteModeHintKey> = {
+  off: 'remote.modeHintOff',
+  fallback: 'remote.modeHintFallback',
+  always: 'remote.modeHintAlways',
+};
+
+function updateRemoteModeHint(mode: string) {
+  const key = REMOTE_MODE_HINT_KEYS[mode];
+  remoteModeHint.textContent = key ? t(key) : '';
+}
+
+/** 把 remote-server.ts 返回的稳定 message 前缀映射为本地化的测试连接错误文案 */
+function remoteTestErrorMessage(message?: string): string {
+  if (message === 'remote_auth_failed') return t('remote.testAuthFailed');
+  if (message === 'remote_not_configured') return t('remote.testNotConfigured');
+  if (message && message.startsWith('remote_unreachable')) return t('remote.testUnreachable');
+  return t('remote.testFailed', { message: message || 'unknown' });
 }
 
 // ===== 语言切换 =====
@@ -301,6 +340,59 @@ interceptModeSelect.addEventListener('change', async () => {
 // 最小文件大小
 minSizeSelect.addEventListener('change', async () => {
   await saveSettings({ minFileSize: parseInt(minSizeSelect.value, 10) });
+});
+
+// 远程下载源 - 模式
+remoteModeSelect.addEventListener('change', async () => {
+  const mode = remoteModeSelect.value as 'off' | 'fallback' | 'always';
+  updateRemoteModeHint(mode);
+  await saveSettings({ remoteMode: mode });
+});
+
+// 远程下载源 - 服务器地址（失焦保存；saveSettings 内部会去除尾部斜杠，
+// 保存后读回以保持输入框显示与实际存储值一致）
+remoteUrlInput.addEventListener('change', async () => {
+  await saveSettings({ remoteUrl: remoteUrlInput.value.trim() });
+  const current = await loadSettings();
+  remoteUrlInput.value = current.remoteUrl;
+});
+
+// 远程下载源 - Token
+remoteTokenInput.addEventListener('change', async () => {
+  await saveSettings({ remoteToken: remoteTokenInput.value });
+});
+
+// 远程下载源 - 测试连接
+remoteTestBtn.addEventListener('click', async () => {
+  const remoteUrl = remoteUrlInput.value.trim().replace(/\/+$/, '');
+  if (!remoteUrl) {
+    remoteTestResult.textContent = t('remote.testNotConfigured');
+    showToast(t('remote.testNotConfigured'), 'error');
+    return;
+  }
+  remoteTestBtn.disabled = true;
+  remoteTestResult.textContent = t('remote.testing');
+  try {
+    const result = await remotePing({ remoteUrl, remoteToken: remoteTokenInput.value });
+    if (result.success) {
+      const msg = t('remote.testSuccess', {
+        app: result.app || 'FluxDown',
+        version: result.version || '',
+      });
+      remoteTestResult.textContent = msg;
+      showToast(msg, 'success');
+    } else {
+      const msg = remoteTestErrorMessage(result.message);
+      remoteTestResult.textContent = msg;
+      showToast(msg, 'error');
+    }
+  } catch (e) {
+    const msg = t('remote.testFailed', { message: String(e) });
+    remoteTestResult.textContent = msg;
+    showToast(msg, 'error');
+  } finally {
+    remoteTestBtn.disabled = false;
+  }
 });
 // 域名 - 显示手动输入框
 addDomainManualBtn.addEventListener('click', () => {

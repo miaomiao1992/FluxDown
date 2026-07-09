@@ -157,28 +157,58 @@ impl ApiHost for ServerApiHost {
     }
 
     /// headless 无确认弹框：外部下载请求直接创建任务，透传 file_size 提示。
+    ///
+    /// `url` 可能是批量入口（`/download/batch`）换行连接的多 URL —— 桌面端由
+    /// 快速下载弹框按行拆分，headless 在此按行拆分逐条创建。单 URL 时全量
+    /// 透传 method/body/audioUrl/filename；多 URL 只共享 cookies/referrer/
+    /// headers/saveDir（method/body/audioUrl 是单请求语义，批量下无意义）。
     async fn submit_external(&self, req: DownloadRequest) -> Result<(), ApiError> {
-        demo_guard(self.demo_url.as_deref(), &req.url)?;
-        let create = CreateTaskRequest {
-            url: req.url,
-            file_name: req.filename,
-            save_dir: req.save_dir,
-            segments: 0,
-            cookies: req.cookies,
-            referrer: req.referrer,
-            proxy_url: String::new(),
-            user_agent: String::new(),
-            queue_id: String::new(),
-            checksum: String::new(),
-            headers: req.headers,
-            torrent_b64: None,
-        };
-        self.send_cmd(|ack| ActorCmd::CreateTask {
-            req: Box::new(create),
-            hint_file_size: req.file_size.unwrap_or(0),
-            ack,
-        })
-        .await??;
+        let urls: Vec<&str> = req
+            .url
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        if urls.is_empty() {
+            return Err(ApiError::BadRequest("url is required".to_string()));
+        }
+        for url in &urls {
+            demo_guard(self.demo_url.as_deref(), url)?;
+        }
+        let single = urls.len() == 1;
+        for url in urls {
+            let create = CreateTaskRequest {
+                url: url.to_string(),
+                file_name: if single {
+                    req.filename.clone()
+                } else {
+                    String::new()
+                },
+                save_dir: req.save_dir.clone(),
+                segments: 0,
+                cookies: req.cookies.clone(),
+                referrer: req.referrer.clone(),
+                proxy_url: String::new(),
+                user_agent: String::new(),
+                queue_id: String::new(),
+                checksum: String::new(),
+                headers: req.headers.clone(),
+                torrent_b64: None,
+                method: if single { req.method.clone() } else { None },
+                body: if single { req.body.clone() } else { None },
+                audio_url: if single { req.audio_url.clone() } else { None },
+            };
+            self.send_cmd(|ack| ActorCmd::CreateTask {
+                req: Box::new(create),
+                hint_file_size: if single {
+                    req.file_size.unwrap_or(0)
+                } else {
+                    0
+                },
+                ack,
+            })
+            .await??;
+        }
         Ok(())
     }
 

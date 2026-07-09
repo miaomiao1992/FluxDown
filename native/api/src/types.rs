@@ -26,7 +26,7 @@ use utoipa::ToSchema;
 ///   `application/x-www-form-urlencoded`
 /// - `urlencoded`：扩展端已序列化好的 url-encoded 字符串（直接作为 body 发送）
 /// - `raw`：base64 编码的二进制 body（XHR / fetch 直接发送 ArrayBuffer 的场景）
-#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum RequestBody {
     FormData {
@@ -41,6 +41,34 @@ pub enum RequestBody {
         #[serde(rename = "contentType", default)]
         content_type: Option<String>,
     },
+}
+
+impl From<RequestBody> for fluxdown_engine::downloader::CapturedRequestBody {
+    /// wire 形态 → 引擎传输无关形态（与 hub 侧 NMH 的同名转换语义一致）。
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fluxdown_api::types::RequestBody;
+    /// use fluxdown_engine::downloader::CapturedRequestBody;
+    ///
+    /// let wire = RequestBody::Urlencoded { raw: "k=v".to_string() };
+    /// let captured = CapturedRequestBody::from(wire);
+    /// assert!(matches!(captured, CapturedRequestBody::Urlencoded { raw } if raw == "k=v"));
+    /// ```
+    fn from(body: RequestBody) -> Self {
+        match body {
+            RequestBody::FormData { fields } => Self::FormData { fields },
+            RequestBody::Urlencoded { raw } => Self::Urlencoded { raw },
+            RequestBody::Raw {
+                bytes_b64,
+                content_type,
+            } => Self::Raw {
+                bytes_b64,
+                content_type,
+            },
+        }
+    }
 }
 
 /// 外部下载请求载荷（浏览器扩展 / 油猴脚本 / aria2 兼容层）。
@@ -282,6 +310,17 @@ pub struct CreateTaskRequest {
     /// 非空时按种子任务创建，`url` 允许为空占位。
     #[serde(default)]
     pub torrent_b64: Option<String>,
+    /// 浏览器原始 HTTP method（`"GET"`/`"POST"`/…）。缺省 = GET。
+    /// form-POST 触发的下载必须携带，否则引擎用 GET 重发会拿到错误内容。
+    #[serde(default)]
+    pub method: Option<String>,
+    /// 浏览器原始请求体（仅非 GET 时有意义）。
+    #[serde(default)]
+    pub body: Option<RequestBody>,
+    /// 音频轨 URL（「视频轨+音频轨」离散下载对语义）。
+    /// 非空 = 引擎分别下载两路后 mux 合并；空/缺省 = 普通单 URL 下载。
+    #[serde(default)]
+    pub audio_url: Option<String>,
 }
 
 /// 创建任务响应（`POST /api/v1/tasks`）。
@@ -384,6 +423,56 @@ mod tests {
             let req: DownloadRequest = serde_json::from_str(case.json)
                 .unwrap_or_else(|e| panic!("case `{}` failed to parse: {e}", case.name));
             (case.check)(&req);
+        }
+    }
+
+    /// 扩展/接管入口透传的浏览器请求事务字段：`method`/`body`/`audioUrl`
+    /// 必须按 camelCase wire 名精确落到 [`CreateTaskRequest`]，且缺省安全。
+    #[test]
+    fn create_task_request_deserializes_browser_transaction_fields() {
+        let req: CreateTaskRequest = serde_json::from_str(
+            r#"{
+                "url": "https://example.com/dl",
+                "method": "POST",
+                "body": {"kind": "raw", "bytesB64": "aGk=", "contentType": "text/plain"},
+                "audioUrl": "https://example.com/audio.m4s"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(req.method.as_deref(), Some("POST"));
+        assert_eq!(
+            req.audio_url.as_deref(),
+            Some("https://example.com/audio.m4s")
+        );
+        match req.body.as_ref().unwrap() {
+            RequestBody::Raw {
+                bytes_b64,
+                content_type,
+            } => {
+                assert_eq!(bytes_b64, "aGk=");
+                assert_eq!(content_type.as_deref(), Some("text/plain"));
+            }
+            other => panic!("expected Raw body, got {other:?}"),
+        }
+
+        // 缺省：旧客户端（CLI / aria2 shim）不带这三个字段，必须解析为 None。
+        let minimal: CreateTaskRequest =
+            serde_json::from_str(r#"{"url": "https://example.com/f.zip"}"#).unwrap();
+        assert!(minimal.method.is_none());
+        assert!(minimal.body.is_none());
+        assert!(minimal.audio_url.is_none());
+
+        // formData 形态 → 引擎 CapturedRequestBody 转换保真。
+        let form: RequestBody = serde_json::from_str(
+            r#"{"kind": "formData", "fields": {"autodl": ["2"], "updates": ["1"]}}"#,
+        )
+        .unwrap();
+        match fluxdown_engine::downloader::CapturedRequestBody::from(form) {
+            fluxdown_engine::downloader::CapturedRequestBody::FormData { fields } => {
+                assert_eq!(fields.get("autodl").unwrap(), &vec!["2".to_string()]);
+                assert_eq!(fields.get("updates").unwrap(), &vec!["1".to_string()]);
+            }
+            other => panic!("expected FormData, got {other:?}"),
         }
     }
 

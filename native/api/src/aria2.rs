@@ -427,6 +427,9 @@ pub(crate) fn build_create_task_request(
         checksum: opts.checksum,
         headers: opts.headers,
         torrent_b64,
+        method: None,
+        body: None,
+        audio_url: None,
     }
 }
 

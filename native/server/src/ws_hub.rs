@@ -296,7 +296,8 @@ impl EventSink for EngineEventSink {
             // BT 数据下载完成(引擎每任务至多发一次):无对应 WS 快照消息,
             // 仅广播 aria2 `onBtDownloadComplete` 通知源事件。
             EngineEvent::BtDataFinished { task_id } => {
-                self.0.broadcast_task_event(task_id, TaskEventKind::BtComplete);
+                self.0
+                    .broadcast_task_event(task_id, TaskEventKind::BtComplete);
                 return;
             }
             // `#[non_exhaustive]`：未来新增变体默认丢弃并记录日志。
@@ -967,6 +968,26 @@ mod tests {
         let hub = Arc::new(WsHub::new(16));
         let mut rx = hub.subscribe_task_events();
         let sink = EngineEventSink(Arc::clone(&hub));
+
+        // 先以 downloading(1) 观测一次：Complete 只在「前态已观测」时触发
+        //（见 task_event_for_transition_fires_complete_only_when_previously_observed），
+        // 首次观测即 completed 不发任何事件，直接 recv 会永久阻塞。
+        sink.emit(EngineEvent::TaskProgress {
+            task_id: "t1".into(),
+            status: 1, // downloading
+            downloaded_bytes: 50,
+            total_bytes: 100,
+            speed: 10,
+            file_name: "f".into(),
+            save_dir: "/tmp".into(),
+            url: "http://x".into(),
+            error_message: String::new(),
+            upload_speed_bps: 0,
+        });
+        assert_eq!(
+            rx.recv().await.expect("start event").kind,
+            TaskEventKind::Start
+        );
 
         sink.emit(EngineEvent::TaskProgress {
             task_id: "t1".into(),

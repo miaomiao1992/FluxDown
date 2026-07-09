@@ -128,7 +128,13 @@ impl EventSink for RinfEventSink {
             } => {
                 {
                     let mut speeds = lock_or_recover(&self.live_speeds);
-                    apply_task_progress_speed(&mut speeds, &task_id, status, speed, upload_speed_bps);
+                    apply_task_progress_speed(
+                        &mut speeds,
+                        &task_id,
+                        status,
+                        speed,
+                        upload_speed_bps,
+                    );
                 }
                 {
                     let event_kind = {

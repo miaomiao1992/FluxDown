@@ -34,7 +34,7 @@ import {
   checkFluxDownAvailable,
   checkFluxDownAvailableWithRetry,
   warmupNativeHost,
-} from "@/utils/native-messaging";
+} from "@/utils/download-dispatch";
 import type {
   DownloadRequest,
   BatchDownloadItem,

@@ -35,6 +35,30 @@ const en: Record<MessageKey, string> = {
     "Press Alt+Shift+D to quickly toggle download interception",
   "settings.dotVisible": "Floating Ball",
 
+  // Remote download source
+  "remote.title": "Remote Download Source",
+  "remote.mode": "Mode",
+  "remote.modeOff": "Desktop Only",
+  "remote.modeFallback": "Desktop First",
+  "remote.modeAlways": "Remote Only",
+  "remote.modeHintOff": "Send downloads to the desktop app via Native Messaging only",
+  "remote.modeHintFallback":
+    "Prefer the desktop app; deliver to the remote server when it's unreachable",
+  "remote.modeHintAlways":
+    "Always deliver downloads to the remote server, skip the desktop app",
+  "remote.serverUrl": "Server Address",
+  "remote.serverUrlPlaceholder": "e.g. http://192.168.1.10:17800",
+  "remote.token": "Access Token",
+  "remote.tokenPlaceholder": "Enter access token",
+  "remote.testConnection": "Test Connection",
+  "remote.testing": "Testing...",
+  "remote.testSuccess": "Connected ({app} v{version})",
+  "remote.testAuthFailed": "Authentication failed, check the access token",
+  "remote.testUnreachable":
+    "Cannot reach the server, check the address and network",
+  "remote.testNotConfigured": "Enter the server address first",
+  "remote.testFailed": "Connection test failed: {message}",
+
 
   // Domain exclusion
   "domain.title": "Excluded Domains",

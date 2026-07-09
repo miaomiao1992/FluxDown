@@ -762,6 +762,24 @@
           "url"
         ],
         "properties": {
+          "audioUrl": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "音频轨 URL（「视频轨+音频轨」离散下载对语义）。\n非空 = 引擎分别下载两路后 mux 合并；空/缺省 = 普通单 URL 下载。"
+          },
+          "body": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RequestBody",
+                "description": "浏览器原始请求体（仅非 GET 时有意义）。"
+              }
+            ]
+          },
           "checksum": {
             "type": "string",
             "description": "Checksum spec，格式 `algo=hexhash`（空 = 跳过校验）。"
@@ -785,6 +803,13 @@
             "propertyNames": {
               "type": "string"
             }
+          },
+          "method": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "浏览器原始 HTTP method（`\"GET\"`/`\"POST\"`/…）。缺省 = GET。\nform-POST 触发的下载必须携带，否则引擎用 GET 重发会拿到错误内容。"
           },
           "proxyUrl": {
             "type": "string",

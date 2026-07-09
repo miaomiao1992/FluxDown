@@ -195,9 +195,9 @@ async fn handle_cmd(cmd: ActorCmd, engine: &mut Engine) {
                     req.checksum,
                     req.headers.unwrap_or_default(),
                     Vec::new(),
-                    None,
-                    None,
-                    None,
+                    req.method,
+                    req.body.map(Into::into),
+                    req.audio_url,
                 )
                 .await;
             // 立即广播 tasksSnapshot，确保客户端在首个 taskProgress 之前

@@ -32,6 +32,27 @@ const zhCN = {
   "settings.altClickHint": "按 Alt+Shift+D 快捷键可快速切换下载拦截开关",
   "settings.dotVisible": "悬浮球",
 
+  // Remote download source
+  "remote.title": "远程下载源",
+  "remote.mode": "模式",
+  "remote.modeOff": "仅桌面",
+  "remote.modeFallback": "桌面优先",
+  "remote.modeAlways": "仅远程",
+  "remote.modeHintOff": "仅通过 Native Messaging 发送到桌面应用",
+  "remote.modeHintFallback": "优先使用桌面应用，不可达时投递到远程服务器",
+  "remote.modeHintAlways": "始终投递到远程服务器，不再尝试连接桌面应用",
+  "remote.serverUrl": "服务器地址",
+  "remote.serverUrlPlaceholder": "如 http://192.168.1.10:17800",
+  "remote.token": "访问令牌",
+  "remote.tokenPlaceholder": "输入访问令牌",
+  "remote.testConnection": "测试连接",
+  "remote.testing": "测试中...",
+  "remote.testSuccess": "已连接（{app} v{version}）",
+  "remote.testAuthFailed": "鉴权失败，请检查访问令牌",
+  "remote.testUnreachable": "无法连接到服务器，请检查地址和网络",
+  "remote.testNotConfigured": "请先填写服务器地址",
+  "remote.testFailed": "连接测试失败：{message}",
+
 
   // Domain exclusion
   "domain.title": "排除域名",

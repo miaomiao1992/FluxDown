@@ -1216,9 +1216,9 @@ async fn handle_api_command(
                     req.checksum,
                     req.headers.unwrap_or_default(),
                     Vec::new(),
-                    None,
-                    None,
-                    None,
+                    req.method,
+                    req.body.map(Into::into),
+                    req.audio_url,
                 )
                 .await;
             // 与 Dart 创建路径一致：立即推送 AllTasks 同步 queue_id 到 UI。

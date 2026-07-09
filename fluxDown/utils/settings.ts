@@ -12,6 +12,14 @@ import { browser } from "wxt/browser";
  */
 export type InterceptMode = "extension" | "smart" | "all";
 
+/**
+ * 远程下载源投递模式：
+ * - 'off': 仅走桌面 NMH 通道（默认，行为与远程功能上线前完全一致）
+ * - 'fallback': 桌面优先，NMH 不可达时投递远程 HTTP 下载源
+ * - 'always': 仅走远程 HTTP 下载源，不再尝试连接桌面 App
+ */
+export type RemoteMode = "off" | "fallback" | "always";
+
 export interface FluxDownSettings {
   /** 是否启用下载拦截 */
   enabled: boolean;
@@ -34,6 +42,15 @@ export interface FluxDownSettings {
   showResourcePanel: boolean;
   /** 是否嗅探图片资源（默认关闭，开启后显示 >100KB 的图片） */
   sniffImages: boolean;
+
+  // === 远程下载源设置 ===
+
+  /** 远程下载源投递模式 */
+  remoteMode: RemoteMode;
+  /** 远程 fluxdown_server 地址，如 http://192.168.1.10:17800（保存时会去除尾部斜杠） */
+  remoteUrl: string;
+  /** 远程 fluxdown_server 鉴权 token */
+  remoteToken: string;
 }
 
 /**
@@ -135,6 +152,11 @@ const DEFAULT_SETTINGS: FluxDownSettings = {
   showFloatingButton: true,
   showResourcePanel: true,
   sniffImages: false,
+
+  // 远程下载源
+  remoteMode: "off",
+  remoteUrl: "",
+  remoteToken: "",
 };
 
 /**
@@ -162,6 +184,10 @@ export async function saveSettings(
 ): Promise<void> {
   const current = await loadSettings();
   const merged = { ...current, ...settings };
+  // remoteUrl 保存时去除尾部斜杠，避免拼接 `/download` 等路径时出现 `//`。
+  if (merged.remoteUrl) {
+    merged.remoteUrl = merged.remoteUrl.replace(/\/+$/, "");
+  }
   await browser.storage.sync.set({ settings: merged });
 }
 
