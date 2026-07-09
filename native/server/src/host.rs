@@ -15,10 +15,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use fluxdown_api::service::{ApiError, ApiHost, LiveSpeed};
+use fluxdown_api::service::{ApiError, ApiHost, LiveSpeed, TaskEvent};
 use fluxdown_api::types::{CreateTaskRequest, DownloadRequest, QueueDto, TaskDto};
 use fluxdown_engine::db::Db;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::actor::ActorCmd;
 use crate::ws_hub::WsHub;
@@ -211,12 +211,18 @@ impl ApiHost for ServerApiHost {
     async fn live_speeds(&self) -> Result<HashMap<String, LiveSpeed>, ApiError> {
         Ok(self.hub.live_speeds_snapshot())
     }
+
+    /// aria2 `/jsonrpc` WS 通知源：订阅 [`WsHub`] 内 `EngineEventSink`
+    /// 维护的任务生命周期事件广播（迁移规则见 `ws_hub` 模块文档）。
+    fn subscribe_task_events(&self) -> Option<broadcast::Receiver<TaskEvent>> {
+        Some(self.hub.subscribe_task_events())
+    }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::demo_guard;
+    use super::*;
 
     const DEMO: &str = "https://example.com/demo.bin";
 
@@ -263,5 +269,42 @@ mod tests {
         // 演示模式关闭时不做任何限制，种子任务的空 URL 必须放行
         // （否则正常部署下 BT 下载会被误拒）。
         assert!(demo_guard(None, "").is_ok());
+    }
+
+    #[tokio::test]
+    async fn subscribe_task_events_delegates_to_the_shared_ws_hub() {
+        use fluxdown_engine::events::{EngineEvent, EventSink};
+
+        use crate::ws_hub::EngineEventSink;
+
+        let db = Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        let (cmd_tx, _cmd_rx) = mpsc::channel(1);
+        let hub = Arc::new(WsHub::new(4));
+        let host = ServerApiHost::new(db, cmd_tx, Arc::clone(&hub), None);
+
+        let mut rx = host
+            .subscribe_task_events()
+            .expect("ServerApiHost must provide a task-event subscription");
+
+        // 经同一个 WsHub 的 EngineEventSink 推一条状态迁移，确认 host 订阅的
+        // 是同一条广播通道，而非另建了一个 WsHub 实例。
+        EngineEventSink(hub).emit(EngineEvent::TaskProgress {
+            task_id: "t1".to_string(),
+            status: 1,
+            downloaded_bytes: 0,
+            total_bytes: 100,
+            speed: 0,
+            file_name: "f".to_string(),
+            save_dir: "/tmp".to_string(),
+            url: "http://x".to_string(),
+            error_message: String::new(),
+            upload_speed_bps: 0,
+        });
+
+        let ev = rx.recv().await.expect("task event");
+        assert_eq!(ev.task_id, "t1");
+        assert_eq!(ev.kind, fluxdown_api::service::TaskEventKind::Start);
     }
 }

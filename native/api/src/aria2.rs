@@ -13,7 +13,7 @@ use std::sync::OnceLock;
 
 use serde_json::{Map, Value, json};
 
-use crate::service::LiveSpeed;
+use crate::service::{LiveSpeed, TaskEventKind};
 use crate::types::{CreateTaskRequest, TaskDto};
 
 // ---------------------------------------------------------------------------
@@ -39,13 +39,22 @@ pub(crate) fn task_id_to_gid(task_id: &str) -> String {
 /// 语义）：命中 0 个 → not found；命中 ≥2 个 → not unique。
 ///
 /// 大小写不敏感；传入值本身也先去除连字符再匹配，因此完整 36 位 `task_id`
-/// （管理 API 使用的原生 ID）同样可直接作为 `gid` 传入。
+/// （管理 API 使用的原生 ID）同样可直接作为 `gid` 传入。空串、含非十六进制
+/// 字符、或长度超过完整 GID（32 位无连字符 UUID）一律直接判定 not
+/// found，不进入前缀匹配——避免畸形输入被当成「空前缀命中全表」。
 pub(crate) fn resolve_gid<'a>(tasks: &'a [TaskDto], gid: &str) -> Result<&'a TaskDto, String> {
     let needle: String = gid
         .chars()
         .filter(|c| *c != '-')
         .collect::<String>()
         .to_ascii_lowercase();
+    // 详见上方文档;这里额外说明:不做该检查的话,空前缀会命中全表第一条,
+    // 或因长度必然唯一而误判 unique。
+    let is_malformed =
+        needle.is_empty() || needle.len() > 32 || !needle.chars().all(|c| c.is_ascii_hexdigit());
+    if is_malformed {
+        return Err(format!("GID {gid} is not found"));
+    }
     let mut matches = tasks.iter().filter(|t| {
         let stripped: String = t.task_id.chars().filter(|c| *c != '-').collect();
         stripped.to_ascii_lowercase().starts_with(&needle)
@@ -444,6 +453,20 @@ fn to_native_bytes(s: &str) -> Result<String, String> {
     parse_aria2_unit_bytes(s).map(|n| n.to_string())
 }
 
+/// aria2 `Integer` 格式的整数选项值（`max-concurrent-downloads`/`split`）：
+/// 必须能解析为合法 `i64`，否则视为非法值，由调用方
+/// （[`map_change_global_options`]）整体拒绝该次 `changeGlobalOption`——
+/// 非法值绝不能写进 config 表（否则会在后续 `getGlobalOption` 回显或引擎
+/// 热应用时才暴露，定位更困难）。不做范围校验：aria2 的
+/// `IntegerGE`/`IntegerRange` 语义因选项而异，这里只做「确实是个整数」这一
+/// 层最基础的净化。
+fn to_native_int(s: &str) -> Result<String, String> {
+    s.trim()
+        .parse::<i64>()
+        .map(|n| n.to_string())
+        .map_err(|_| format!("invalid integer: {s}"))
+}
+
 /// 契约表：`local://aria2_compat_contract.md` §「aria2 全局选项 ↔ FluxDown
 /// config key 映射」。
 const GLOBAL_OPTION_MAPPINGS: &[GlobalOptionMapping] = &[
@@ -456,7 +479,7 @@ const GLOBAL_OPTION_MAPPINGS: &[GlobalOptionMapping] = &[
     GlobalOptionMapping {
         aria2_key: "max-concurrent-downloads",
         config_key: "max_concurrent_tasks",
-        to_native: identity,
+        to_native: to_native_int,
         default_native: "5",
     },
     GlobalOptionMapping {
@@ -468,7 +491,7 @@ const GLOBAL_OPTION_MAPPINGS: &[GlobalOptionMapping] = &[
     GlobalOptionMapping {
         aria2_key: "split",
         config_key: "default_segments",
-        to_native: identity,
+        to_native: to_native_int,
         default_native: "5",
     },
     GlobalOptionMapping {
@@ -606,8 +629,9 @@ pub(crate) const METHOD_NAMES: &[&str] = &[
     "system.listNotifications",
 ];
 
-/// `system.listNotifications` 名单（WS 通知本轮未实现，但方法本身
-/// 只是名单——真实 aria2 客户端也是先探测名单再决定是否订阅）。
+/// `system.listNotifications` 名单——真实 aria2 客户端也是先探测名单再决定是否
+/// 订阅。顺序与 [`TaskEventKind`] 声明顺序一一对应（见下方
+/// [`notification_method`]），两者若不同步会被单测捕获。
 pub(crate) const NOTIFICATION_NAMES: &[&str] = &[
     "aria2.onDownloadStart",
     "aria2.onDownloadPause",
@@ -616,6 +640,39 @@ pub(crate) const NOTIFICATION_NAMES: &[&str] = &[
     "aria2.onDownloadError",
     "aria2.onBtDownloadComplete",
 ];
+
+// ---------------------------------------------------------------------------
+// WebSocket 通知帧拼装（`/jsonrpc` WS 会话广播，见 `crate::jsonrpc_ws`）
+// ---------------------------------------------------------------------------
+
+/// [`TaskEventKind`] → aria2 通知方法名，一一对应（见该类型文档每个变体的
+/// 映射说明）。
+pub(crate) fn notification_method(kind: TaskEventKind) -> &'static str {
+    match kind {
+        TaskEventKind::Start => "aria2.onDownloadStart",
+        TaskEventKind::Pause => "aria2.onDownloadPause",
+        TaskEventKind::Stop => "aria2.onDownloadStop",
+        TaskEventKind::Complete => "aria2.onDownloadComplete",
+        TaskEventKind::Error => "aria2.onDownloadError",
+        TaskEventKind::BtComplete => "aria2.onBtDownloadComplete",
+    }
+}
+
+/// 拼装一条 WS 通知帧：
+/// `{"jsonrpc":"2.0","method":"aria2.onDownloadStart","params":[{"gid":"..."}]}`。
+///
+/// **无 `id` 字段**（JSON-RPC 2.0 Notification 语义）；`params` 恒为长度 1 的
+/// 数组，只含 `gid`，不携带 status/totalLength 等其它字段——客户端需自行调用
+/// `aria2.tellStatus` 补全详情。逐字对齐真实 aria2
+/// `WebSocketSessionMan::addNotification()` 的固定格式（见
+/// `local://aria2_rpc_methods.md` §5）。
+pub(crate) fn build_notification_frame(task_id: &str, kind: TaskEventKind) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": notification_method(kind),
+        "params": [{ "gid": task_id_to_gid(task_id) }],
+    })
+}
 
 static SESSION_ID: OnceLock<String> = OnceLock::new();
 
@@ -726,6 +783,31 @@ mod tests {
         let tasks = vec![task("550e8400-e29b-41d4-a716-446655440000", 1)];
         let err = resolve_gid(&tasks, "ffffffff").unwrap_err();
         assert_eq!(err, "GID ffffffff is not found");
+    }
+
+    #[test]
+    fn resolve_gid_rejects_empty_gid_without_matching_any_task() {
+        // 空 needle 不得被当成「匹配任意任务」的空前缀——否则会命中列表里
+        // 第一个任务（或因长度必然唯一而误判 unique），而非真正的 not found。
+        let tasks = vec![task("550e8400-e29b-41d4-a716-446655440000", 1)];
+        let err = resolve_gid(&tasks, "").unwrap_err();
+        assert_eq!(err, "GID  is not found");
+    }
+
+    #[test]
+    fn resolve_gid_rejects_non_hex_characters() {
+        let tasks = vec![task("550e8400-e29b-41d4-a716-446655440000", 1)];
+        let err = resolve_gid(&tasks, "zz-not-hex").unwrap_err();
+        assert_eq!(err, "GID zz-not-hex is not found");
+    }
+
+    #[test]
+    fn resolve_gid_rejects_needle_longer_than_full_gid() {
+        // 32 hex 字符是无连字符 UUID 的完整长度；再长必然不是合法 GID/task_id。
+        let tasks = vec![task("550e8400-e29b-41d4-a716-446655440000", 1)];
+        let overlong = "5".repeat(33);
+        let err = resolve_gid(&tasks, &overlong).unwrap_err();
+        assert_eq!(err, format!("GID {overlong} is not found"));
     }
 
     #[test]
@@ -1018,6 +1100,30 @@ mod tests {
     }
 
     #[test]
+    fn map_change_global_options_errors_on_invalid_max_concurrent_downloads() {
+        let options = json!({ "max-concurrent-downloads": "not-a-number" });
+        assert!(map_change_global_options(options.as_object().unwrap()).is_err());
+    }
+
+    #[test]
+    fn map_change_global_options_errors_on_invalid_split() {
+        let options = json!({ "split": "lots" });
+        assert!(map_change_global_options(options.as_object().unwrap()).is_err());
+    }
+
+    #[test]
+    fn map_change_global_options_rejects_invalid_integer_without_partial_writes() {
+        // 非法整数必须让整次调用失败,不能把它前面已解析成功的其它键悄悄
+        // 落到返回值里——changeGlobalOption 是「整体成功或整体失败」。
+        let options = json!({
+            "dir": "/data",
+            "max-concurrent-downloads": "not-a-number",
+        });
+        let err = map_change_global_options(options.as_object().unwrap()).unwrap_err();
+        assert!(err.contains("max-concurrent-downloads"), "{err}");
+    }
+
+    #[test]
     fn build_global_option_uses_config_values_and_static_defaults() {
         let mut config = HashMap::new();
         config.insert("default_save_dir".to_string(), "/home/user/dl".to_string());
@@ -1057,6 +1163,84 @@ mod tests {
             a.chars()
                 .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
         );
+    }
+
+    // -- WS 通知帧拼装 -----------------------------------------------------
+
+    #[test]
+    fn notification_method_covers_every_kind_in_notification_names_order() {
+        let kinds = [
+            TaskEventKind::Start,
+            TaskEventKind::Pause,
+            TaskEventKind::Stop,
+            TaskEventKind::Complete,
+            TaskEventKind::Error,
+            TaskEventKind::BtComplete,
+        ];
+        let methods: Vec<&str> = kinds.iter().map(|k| notification_method(*k)).collect();
+        assert_eq!(methods, NOTIFICATION_NAMES);
+    }
+
+    #[test]
+    fn notification_method_maps_each_kind_to_its_aria2_name() {
+        assert_eq!(
+            notification_method(TaskEventKind::Start),
+            "aria2.onDownloadStart"
+        );
+        assert_eq!(
+            notification_method(TaskEventKind::Pause),
+            "aria2.onDownloadPause"
+        );
+        assert_eq!(
+            notification_method(TaskEventKind::Stop),
+            "aria2.onDownloadStop"
+        );
+        assert_eq!(
+            notification_method(TaskEventKind::Complete),
+            "aria2.onDownloadComplete"
+        );
+        assert_eq!(
+            notification_method(TaskEventKind::Error),
+            "aria2.onDownloadError"
+        );
+        assert_eq!(
+            notification_method(TaskEventKind::BtComplete),
+            "aria2.onBtDownloadComplete"
+        );
+    }
+
+    #[test]
+    fn build_notification_frame_matches_aria2_wire_format_exactly() {
+        let frame =
+            build_notification_frame("550e8400-e29b-41d4-a716-446655440000", TaskEventKind::Start);
+        assert_eq!(
+            frame,
+            json!({
+                "jsonrpc": "2.0",
+                "method": "aria2.onDownloadStart",
+                "params": [{ "gid": "550e8400e29b41d4" }],
+            })
+        );
+    }
+
+    #[test]
+    fn build_notification_frame_has_no_id_field() {
+        let frame = build_notification_frame("t1", TaskEventKind::Complete);
+        let obj = frame.as_object().unwrap();
+        assert!(obj.get("id").is_none(), "aria2 通知帧不带 id 字段");
+        assert_eq!(obj.len(), 3, "只应有 jsonrpc/method/params 三个键");
+    }
+
+    #[test]
+    fn build_notification_frame_params_is_single_element_array_with_only_gid() {
+        let task_id = "abcd1234-0000-0000-0000-000000000000";
+        let frame = build_notification_frame(task_id, TaskEventKind::BtComplete);
+        assert_eq!(frame["method"], "aria2.onBtDownloadComplete");
+        let params = frame["params"].as_array().unwrap();
+        assert_eq!(params.len(), 1);
+        let entry = params[0].as_object().unwrap();
+        assert_eq!(entry.len(), 1, "params[0] 只应有 gid 一个键");
+        assert_eq!(entry["gid"], task_id_to_gid(task_id));
     }
 
     // -- 错误文案 ---------------------------------------------------------------

@@ -15,15 +15,20 @@
 //!   由 [`crate::rinf_sink::RinfEventSink`] 在 `EngineEvent::TaskProgress`
 //!   时写入，两者共享同一个 `Arc`（构造点见 `download_actor::run`），
 //!   不经 actor 往返。
+//! - **任务事件订阅**([`ApiHost::subscribe_task_events`])返回内存态
+//!   `broadcast::Sender<TaskEvent>` 的新 `Receiver`,同一个 `Sender` 由
+//!   [`crate::rinf_sink::RinfEventSink`] 在状态迁移判定后发送(构造点同见
+//!   `download_actor::run`),供 `/jsonrpc` 的 WS 层转译为
+//!   `aria2.onDownloadXxx` 通知帧。
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use fluxdown_api::service::{ApiError, ApiHost, LiveSpeed};
+use fluxdown_api::service::{ApiError, ApiHost, LiveSpeed, TaskEvent};
 use fluxdown_api::types::{CreateTaskRequest, DownloadRequest, QueueDto, TaskDto};
 use fluxdown_engine::db::Db;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 /// 任务实时速率表：`task_id → LiveSpeed`。写端见 [`crate::rinf_sink::RinfEventSink`]；
 /// 这里只是共享 `Arc` 的类型别名，读写双方各自加锁做「单次操作 + 立即
@@ -85,25 +90,31 @@ pub struct HubApiHost {
     db: Db,
     cmd_tx: mpsc::Sender<ApiCommand>,
     ext_tx: mpsc::Sender<DownloadRequest>,
-    /// 实时速率表，与注入 `RinfEventSink` 的是同一个 `Arc`。
+    /// 实时速率表,与注入 `RinfEventSink` 的是同一个 `Arc`。
     live_speeds: LiveSpeedMap,
+    /// 任务生命周期事件广播源,与注入 `RinfEventSink` 的是同一个 `Sender`;
+    /// `subscribe_task_events()` 经它开出新的 `Receiver`。
+    task_events_tx: broadcast::Sender<TaskEvent>,
 }
 
 impl HubApiHost {
-    /// `cmd_tx` → actor 的 `api_cmd_rx`；`ext_tx` → actor 的 `native_msg_rx`
-    /// （与 NMH / 脚本接管共用的外部下载通道）；`live_speeds` → 与
-    /// `RinfEventSink` 共享的同一个实时速率表 `Arc`。
+    /// `cmd_tx` → actor 的 `api_cmd_rx`;`ext_tx` → actor 的 `native_msg_rx`
+    /// (与 NMH / 脚本接管共用的外部下载通道);`live_speeds` → 与
+    /// `RinfEventSink` 共享的同一个实时速率表 `Arc`;`task_events_tx` → 与
+    /// `RinfEventSink` 共享的同一个任务事件广播 `Sender`。
     pub fn new(
         db: Db,
         cmd_tx: mpsc::Sender<ApiCommand>,
         ext_tx: mpsc::Sender<DownloadRequest>,
         live_speeds: LiveSpeedMap,
+        task_events_tx: broadcast::Sender<TaskEvent>,
     ) -> Self {
         Self {
             db,
             cmd_tx,
             ext_tx,
             live_speeds,
+            task_events_tx,
         }
     }
 
@@ -232,5 +243,9 @@ impl ApiHost for HubApiHost {
 
     async fn live_speeds(&self) -> Result<HashMap<String, LiveSpeed>, ApiError> {
         Ok(lock_or_recover(&self.live_speeds).clone())
+    }
+
+    fn subscribe_task_events(&self) -> Option<broadcast::Receiver<TaskEvent>> {
+        Some(self.task_events_tx.subscribe())
     }
 }

@@ -10,7 +10,7 @@ use fluxdown_engine::proxy_config::ProxyConfig;
 use fluxdown_engine::selection::HostSelection;
 use fluxdown_engine::{Engine, EngineConfig};
 use rinf::{DartSignal, RustSignal};
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 
 use crate::api_host::{ApiCommand, HubApiHost, LiveSpeedMap};
 use crate::file_association;
@@ -33,6 +33,7 @@ use crate::signals::{
 };
 use crate::updater;
 use fluxdown_api::server::{ApiServerConfig, ApiServerHandle, spawn_api_server};
+use fluxdown_api::service::TaskEvent;
 
 /// Compute default save directory (platform-dependent).
 fn default_save_dir() -> String {
@@ -309,7 +310,22 @@ pub async fn run(db_dir: PathBuf) {
     // `live_speeds`:aria2 兼容层 `live_speeds()` 的实时速率表,`RinfEventSink`
     // 写、`HubApiHost` 读,构造后两侧共享同一个 `Arc`(见下方 `api_host` 构造点)。
     let live_speeds: LiveSpeedMap = Arc::new(Mutex::new(HashMap::new()));
-    let sink: Arc<dyn EventSink> = Arc::new(RinfEventSink::new(live_speeds.clone()));
+    // aria2 兼容层 WS 通知源:`RinfEventSink` 在状态迁移判定后广播,
+    // `HubApiHost::subscribe_task_events()`、本循环删除命令处理点与
+    // `handle_api_command` 的 `DeleteTask` 分支(经 `rinf_sink.
+    // broadcast_task_stop`)共用同一个 `Sender`。容量 256:无订阅者时
+    // `send` 直接返回 `Err` 并被忽略,容量只影响「有订阅者但消费慢」时
+    // 的积压上限,超限后旧订阅者下次 `recv()` 收到 `Lagged`。
+    let (task_events_tx, _) = broadcast::channel::<TaskEvent>(256);
+    // 保留具体类型的 `Arc`:除了作为 `Arc<dyn EventSink>` 注入引擎,删除
+    // 命令处理点还需直接调用 `broadcast_task_stop`——它不在 `EventSink`
+    // trait 上,因为那是 aria2 兼容层专属的收尾动作,不属于通用事件转发
+    // 契约。
+    let rinf_sink = Arc::new(RinfEventSink::new(
+        live_speeds.clone(),
+        task_events_tx.clone(),
+    ));
+    let sink: Arc<dyn EventSink> = rinf_sink.clone();
     let selector: Arc<dyn HostSelection> = Arc::new(RinfHostSelection::new());
 
     let mut engine = match Engine::new(
@@ -547,6 +563,7 @@ pub async fn run(db_dir: PathBuf) {
         api_cmd_tx,
         ext_dl_tx.clone(),
         live_speeds,
+        task_events_tx,
     ));
     let mut api_server_handle = {
         let cfg = ApiServerConfig::from_config_map(
@@ -626,8 +643,16 @@ pub async fn run(db_dir: PathBuf) {
                     0 => engine.manager.pause_task(&msg.task_id).await,
                     1 => engine.manager.resume_task(&msg.task_id).await,
                     2 => engine.manager.cancel_task(&msg.task_id).await,
-                    3 => engine.manager.delete_task(&msg.task_id, true).await,   // delete record + files
-                    4 => engine.manager.delete_task(&msg.task_id, false).await,  // delete record only
+                    3 => {
+                        // delete record + files
+                        engine.manager.delete_task(&msg.task_id, true).await;
+                        rinf_sink.broadcast_task_stop(&msg.task_id);
+                    }
+                    4 => {
+                        // delete record only
+                        engine.manager.delete_task(&msg.task_id, false).await;
+                        rinf_sink.broadcast_task_stop(&msg.task_id);
+                    }
                     _ => {}
                 }
             }
@@ -640,8 +665,18 @@ pub async fn run(db_dir: PathBuf) {
                 match msg.action {
                     0 => engine.manager.batch_pause(&msg.task_ids).await,
                     1 => engine.manager.batch_resume(&msg.task_ids).await,
-                    3 => engine.manager.delete_tasks_batch(&msg.task_ids, true).await,
-                    4 => engine.manager.delete_tasks_batch(&msg.task_ids, false).await,
+                    3 => {
+                        engine.manager.delete_tasks_batch(&msg.task_ids, true).await;
+                        for task_id in &msg.task_ids {
+                            rinf_sink.broadcast_task_stop(task_id);
+                        }
+                    }
+                    4 => {
+                        engine.manager.delete_tasks_batch(&msg.task_ids, false).await;
+                        for task_id in &msg.task_ids {
+                            rinf_sink.broadcast_task_stop(task_id);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -695,6 +730,7 @@ pub async fn run(db_dir: PathBuf) {
                     &ed2k_sub_tx,
                     &api_host,
                     &mut api_server_handle,
+                    &rinf_sink,
                 )
                 .await;
             }
@@ -1116,6 +1152,8 @@ pub async fn run(db_dir: PathBuf) {
 /// `tracker_sub_tx`/`ed2k_sub_tx`/`api_host`/`api_server_handle`：仅
 /// `ApplyConfig` 命令分支需要，透传给 [`apply_config_key`]（与 Dart
 /// `SaveConfig` 信号分支共用同一套「键 → 引擎 setter」逻辑）。
+/// `rinf_sink`:`DeleteTask` 分支需要,删除成功后广播 aria2 `Stop` 事件
+/// 并从前态表移除条目(见 `RinfEventSink::broadcast_task_stop`)。
 async fn handle_api_command(
     cmd: ApiCommand,
     engine: &mut Engine,
@@ -1123,6 +1161,7 @@ async fn handle_api_command(
     ed2k_sub_tx: &mpsc::Sender<fluxdown_engine::ed2k::server_subscription::ServerFetchOutcome>,
     api_host: &Arc<dyn fluxdown_api::service::ApiHost>,
     api_server_handle: &mut ApiServerHandle,
+    rinf_sink: &Arc<RinfEventSink>,
 ) {
     match cmd {
         ApiCommand::CreateTask { req, ack } => {
@@ -1200,6 +1239,7 @@ async fn handle_api_command(
             ack,
         } => {
             engine.manager.delete_task(&task_id, delete_files).await;
+            rinf_sink.broadcast_task_stop(&task_id);
             let _ = ack.send(());
         }
         ApiCommand::PauseAll { ack } => {

@@ -221,8 +221,10 @@ async fn handle_cmd(cmd: ActorCmd, engine: &mut Engine) {
             ack,
         } => {
             engine.manager.delete_task(&task_id, delete_files).await;
-            // 删除没有对应的 TaskProgress 事件——主动广播快照，
-            // 让其他 WS 客户端的列表同步移除该任务。
+            // 删除没有专属快照事件——主动重发全量快照，让其他 WS 客户端的
+            // 任务列表同步移除该任务；WsHub 也正是靠这次重发的快照（而非
+            // 本处再单独广播）来判定并发出 aria2 onDownloadStop 通知，
+            // 时序说明见 `ws_hub.rs` 模块顶部“删除路径的 Stop 时序”。
             engine.manager.load_and_send_all_tasks().await;
             let _ = ack.send(());
         }

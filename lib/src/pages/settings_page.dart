@@ -2912,7 +2912,7 @@ const _kUaPresets = {
 };
 
 String _detectPreset(String ua) {
-  if (ua.isEmpty) return 'chrome'; // 空 = 内置 Chrome UA
+  if (ua.isEmpty) return 'default'; // 空 = 内置默认标识（FluxDown/版本号）
   for (final entry in _kUaPresets.entries) {
     if (entry.value == ua) return entry.key;
   }
@@ -2960,9 +2960,9 @@ class _UserAgentEditorState extends State<_UserAgentEditor> {
     if (preset == null) return;
     setState(() => _selectedPreset = preset);
     if (preset != 'custom') {
+      // 'default' 不在 _kUaPresets 中，映射为空字符串（引擎内置 UA）
       final ua = _kUaPresets[preset] ?? '';
       _controller.text = ua;
-      // 空字符串 = 使用内置 Chrome UA，与 'chrome' 预设语义等价
       widget.settingsProvider.setGlobalUserAgent(ua);
     }
   }
@@ -2989,6 +2989,10 @@ class _UserAgentEditorState extends State<_UserAgentEditor> {
           child: ShadSelect<String>(
             initialValue: _selectedPreset,
             options: [
+              ShadOption(
+                value: 'default',
+                child: Text(s.userAgentPresetDefault),
+              ),
               ShadOption(value: 'chrome', child: Text(s.userAgentPresetChrome)),
               ShadOption(
                 value: 'firefox',
@@ -3004,6 +3008,7 @@ class _UserAgentEditorState extends State<_UserAgentEditor> {
             ],
             selectedOptionBuilder: (context, value) {
               final label = switch (value) {
+                'default' => s.userAgentPresetDefault,
                 'chrome' => 'Chrome',
                 'firefox' => 'Firefox',
                 'edge' => 'Edge',

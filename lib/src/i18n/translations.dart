@@ -716,11 +716,15 @@ class S {
     '下载请求时使用的浏览器标识。百度网盘直链下载需设为 netdisk',
     'Browser identity used in download requests. Set to "netdisk" for Baidu Pan.',
   );
-  String get userAgentPlaceholder =>
-      _t('留空使用内置 Chrome UA', 'Leave empty to use built-in Chrome UA');
+  String get userAgentPlaceholder => _t(
+    '留空使用默认标识 FluxDown/版本号',
+    'Leave empty for default identity FluxDown/<version>',
+  );
   String get userAgentTaskPlaceholder =>
       _t('留空使用全局设置', 'Leave empty to use global setting');
-  String get userAgentPresetChrome => _t('Chrome（默认）', 'Chrome (default)');
+  String get userAgentPresetDefault =>
+      _t('默认（FluxDown）', 'Default (FluxDown)');
+  String get userAgentPresetChrome => _t('Chrome', 'Chrome');
   String get userAgentPresetFirefox => _t('Firefox', 'Firefox');
   String get userAgentPresetEdge => _t('Edge', 'Edge');
   String get userAgentPresetSafari => _t('Safari（macOS）', 'Safari (macOS)');
@@ -1250,6 +1254,8 @@ class S {
     '填写邮箱可收到反馈进度通知，其他联系方式可能无法收到通知',
     'Enter your email to receive progress notifications. Other contact methods may not receive notifications.',
   );
+  String get feedbackVersionLabel => _t('应用版本', 'App Version');
+  String get feedbackVersionAuto => _t('自动获取', 'Auto-detected');
   String get feedbackAttachLogs => _t('附带今日日志', 'Attach today\'s logs');
   String get feedbackAttachLogsHint => _t(
     '发送时附带当天日志（已脱敏），有助于我们更快定位问题',

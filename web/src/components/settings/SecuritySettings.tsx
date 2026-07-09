@@ -22,6 +22,8 @@ export function SecuritySettings({
   const [showToken, setShowToken] = useState(false)
   const takeover = (config.local_server_takeover_enabled ?? 'true') === 'true'
   const jsonrpc = (config.local_server_jsonrpc_enabled ?? 'true') === 'true'
+  const mcp = (config.local_server_mcp_enabled ?? 'true') === 'true'
+  const origin = window.location.origin
   const conn = useStore(connStore)
   const { data: stats } = useQuery({ queryKey: ['stats'], queryFn: api.stats, refetchInterval: 5000 })
 
@@ -62,12 +64,28 @@ export function SecuritySettings({
         </SetRow>
       </div>
       <div className="set-group">
-        <SetRow title={t('set.sec.jsonrpc')} desc={t('set.sec.jsonrpcDesc')}>
-          <SetSwitch checked={jsonrpc} onCheckedChange={(v) => mutate({ local_server_jsonrpc_enabled: String(v) })} />
-        </SetRow>
         <SetRow title={t('set.sec.takeover')} desc={t('set.sec.takeoverDesc')}>
           <SetSwitch checked={takeover} onCheckedChange={(v) => mutate({ local_server_takeover_enabled: String(v) })} />
         </SetRow>
+        <AddrRow value={origin} copyTitle={t('set.sec.copyAddr')} />
+      </div>
+      <div className="set-group">
+        <SetRow title={t('set.sec.jsonrpc')} desc={t('set.sec.jsonrpcDesc')}>
+          <SetSwitch checked={jsonrpc} onCheckedChange={(v) => mutate({ local_server_jsonrpc_enabled: String(v) })} />
+        </SetRow>
+        <AddrRow value={`${origin}/jsonrpc`} copyTitle={t('set.sec.copyAddr')} />
+      </div>
+      <div className="set-group">
+        <SetRow title={t('set.sec.api')} desc={t('set.sec.apiDesc')}>
+          <SetSwitch checked disabled onCheckedChange={() => {}} />
+        </SetRow>
+        <AddrRow value={`${origin}/api/v1`} copyTitle={t('set.sec.copyAddr')} />
+      </div>
+      <div className="set-group">
+        <SetRow title={t('set.sec.mcp')} desc={t('set.sec.mcpDesc')}>
+          <SetSwitch checked={mcp} onCheckedChange={(v) => mutate({ local_server_mcp_enabled: String(v) })} />
+        </SetRow>
+        <AddrRow value={`${origin}/mcp`} copyTitle={t('set.sec.copyAddr')} />
       </div>
       <div className="set-group">
         <SetRow
@@ -78,5 +96,17 @@ export function SecuritySettings({
         </SetRow>
       </div>
     </>
+  )
+}
+
+/** 端点地址行：等宽字体地址 + 复制按钮，对标桌面端 API 服务卡片的"地址"栏。 */
+function AddrRow({ value, copyTitle }: { value: string; copyTitle: string }) {
+  return (
+    <div className="set-row">
+      <div className="token-box" style={{ flex: 1 }}>
+        <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{value}</span>
+        <CopyButton value={value} title={copyTitle} />
+      </div>
+    </div>
   )
 }

@@ -885,28 +885,33 @@ mod tests {
 
     #[tokio::test]
     async fn tell_status_filters_by_keys() {
-        let host = TestHost::default().with_tasks(vec![task("t1", 1)]);
-        let resp = call(&host, "aria2.tellStatus", json!(["t1", ["status", "gid"]])).await;
+        let host = TestHost::default().with_tasks(vec![task("1a1a", 1)]);
+        let resp = call(
+            &host,
+            "aria2.tellStatus",
+            json!(["1a1a", ["status", "gid"]]),
+        )
+        .await;
         let result = resp["result"].as_object().unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(result["status"], "active");
-        assert_eq!(result["gid"], "t1");
+        assert_eq!(result["gid"], "1a1a");
     }
 
     #[tokio::test]
     async fn tell_status_uses_live_speed_for_matching_task() {
         let mut speeds = HashMap::new();
         speeds.insert(
-            "t1".to_string(),
+            "1a1a".to_string(),
             LiveSpeed {
                 download_bps: 555,
                 upload_bps: 0,
             },
         );
         let host = TestHost::default()
-            .with_tasks(vec![task("t1", 1)])
+            .with_tasks(vec![task("1a1a", 1)])
             .with_speeds(speeds);
-        let resp = call(&host, "aria2.tellStatus", json!(["t1"])).await;
+        let resp = call(&host, "aria2.tellStatus", json!(["1a1a"])).await;
         assert_eq!(resp["result"]["downloadSpeed"], "555");
     }
 
@@ -1047,21 +1052,21 @@ mod tests {
 
     #[tokio::test]
     async fn remove_download_result_rejects_non_stopped_task() {
-        let host = TestHost::default().with_tasks(vec![task("t1", 1)]);
-        let resp = call(&host, "aria2.removeDownloadResult", json!(["t1"])).await;
+        let host = TestHost::default().with_tasks(vec![task("1a1a", 1)]);
+        let resp = call(&host, "aria2.removeDownloadResult", json!(["1a1a"])).await;
         assert_eq!(resp["error"]["code"], 1);
         assert_eq!(
             resp["error"]["message"],
-            "Could not remove download result of GID#t1"
+            "Could not remove download result of GID#1a1a"
         );
     }
 
     #[tokio::test]
     async fn remove_download_result_deletes_stopped_task() {
-        let host = TestHost::default().with_tasks(vec![task("t1", 3)]);
-        let resp = call(&host, "aria2.removeDownloadResult", json!(["t1"])).await;
+        let host = TestHost::default().with_tasks(vec![task("1a1a", 3)]);
+        let resp = call(&host, "aria2.removeDownloadResult", json!(["1a1a"])).await;
         assert_eq!(resp["result"], "OK");
-        assert_eq!(host.deleted.lock().unwrap()[0], ("t1".to_string(), false));
+        assert_eq!(host.deleted.lock().unwrap()[0], ("1a1a".to_string(), false));
     }
 
     #[tokio::test]
