@@ -248,7 +248,15 @@ class HeaderBarState extends State<HeaderBar> {
         padding: const EdgeInsets.only(left: 16),
         decoration: BoxDecoration(
           color: c.surface1,
-          border: Border(bottom: BorderSide(color: c.border, width: 1)),
+          border: Border(
+            // 顶部系统边线仅 Windows 补齐：自定义 titlebar 去掉 WS_CAPTION 后
+            // DWM 不再绘制顶部 1px 边线（左/右/下由 WS_THICKFRAME 提供）。
+            // macOS traffic light / Linux 各有原生边框行为，不加以免不一致。
+            top: Platform.isWindows
+                ? BorderSide(color: c.border, width: 1)
+                : BorderSide.none,
+            bottom: BorderSide(color: c.border, width: 1),
+          ),
         ),
         child: Row(
           children: [
