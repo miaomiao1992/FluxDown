@@ -17,7 +17,6 @@ Click **New Download** in the top bar (or press <kbd>Ctrl</kbd>/<kbd>Cmd</kbd>+<
 | **Save Directory** | Where the file lands. Defaults to your global save directory (**Settings → Download**), or your last-used folder if **Remember Last Save Location** is on. |
 | **Threads** | Segments to split the download into: **Auto** (FluxDown picks based on file size and CPU count), a fixed preset (4/8/16/32/64), or a custom value from 1–256. Hidden for magnet links and `.torrent` files, since BitTorrent manages its own connections. |
 | **Rename (optional)** | Override the detected filename. Only shown for a single URL — batch downloads and torrents always use the detected/embedded name. |
-| **Queue** | Assign the task to a named queue instead of the default one. Only appears once you've created at least one queue (see below). |
 
 Click **Advanced Options** to reveal per-task overrides that default to your global settings when left empty:
 
@@ -29,7 +28,12 @@ Click **Advanced Options** to reveal per-task overrides that default to your glo
 | **Hash Verification** | Pick an algorithm (MD5/SHA-1/SHA-256/SHA-512) and paste the expected hash. FluxDown verifies the file after download and flags a mismatch. Leave blank to skip. |
 | **Custom Headers** | Extra HTTP headers as key/value rows (use **+ Add header** for more). Use the Cookie field above for cookies rather than a `Cookie` header here. |
 
-Click **Start** (or **Download N files** for a batch) to begin.
+Two action buttons submit the form, each with a queue picker on its arrow:
+
+- **Start Download ▾** (shown as **Download N files** for a batch) — creates the task(s) and starts them right away. By default they join your default queue (**Settings → Download → Default Queue**, or the queue currently selected in the sidebar).
+- **Download Later ▾** — creates the task(s) in a **paused** state without starting them, parked in the built-in **Download Later** queue. They don't occupy a concurrency slot until you start them (or start the whole queue — see below).
+
+Click either button's small arrow to pick an explicit target queue instead — choosing a queue from the menu submits immediately into it.
 
 <!-- TODO(screenshot): 新建下载对话框,展示 URL 多行输入 + 展开的高级选项 -->
 
@@ -44,17 +48,51 @@ Click **Start** (or **Download N files** for a batch) to begin.
 
 A global speed limit lives in the **status bar** at the bottom of the window — click the limit indicator to open a popover with presets (128 KB/s, 512 KB/s, 1 MB/s, 2 MB/s, 5 MB/s) or type a custom KB/s value. It's off (unlimited) by default.
 
-For finer control, create a **named queue** from the **Queues** section of the sidebar (click the **+** button). Each queue has its own:
+Every task belongs to a queue. Two queues are built in and can't be deleted or renamed:
 
+- **Main Queue** — where new downloads land unless you pick another queue.
+- **Download Later** — where the **Download Later** button parks tasks in a paused state.
+
+Create additional **named queues** from the **Queues** section of the sidebar (click the **+** button). Click any queue in the sidebar to filter the task list down to it.
+
+### Queue settings
+
+Hover (or right-click) a queue and open its manager dialog. The **Settings** tab holds the per-queue configuration:
+
+- Name (locked for the two built-in queues)
 - Speed limit in KB/s (0 = unlimited)
 - Max concurrent downloads (0 = use the global setting)
 - Default save directory
 - Default thread count (0 = auto)
 - Default User-Agent (empty = inherit the global one)
 
-Assign a task to a queue from the Queue dropdown in the New Download dialog. Right-click (or hover) a queue in the sidebar to edit or delete it — deleting a queue moves its tasks back to the default queue. Click a status or queue entry in the sidebar to filter the task list down to it.
+Deleting a named queue (built-in queues can't be deleted) moves its tasks back to the Main Queue. To move an existing task between queues, use the **Queue** tab of its detail panel.
 
-The global **Max Concurrent Downloads** cap (default 5) lives in **Settings → Download** and applies across all queues unless a queue overrides it.
+### Starting and stopping a queue
+
+A queue is always either **running** or **stopped** — the small dot next to its name in the sidebar shows which. Hover a queue for a play/pause button (also available from its right-click menu):
+
+- **Stop Queue** pauses every waiting and active task in it. While a queue is stopped, nothing inside it is auto-started: **Resume All** and the scheduler skip stopped queues entirely.
+- **Start Queue** flips it back to running and resumes its unfinished tasks, in queue order.
+
+This makes a queue a one-click switch for a whole group of downloads — for example, keep bulk downloads in their own queue and stop it while you need the bandwidth, or park tasks in **Download Later** and start that queue overnight.
+
+### Daily schedule
+
+Each queue can start and/or stop itself automatically. The queue manager's **Schedule** tab has:
+
+- A daily **start time** and **stop time** (`HH:MM`, picked from a time grid). You can fill either one or both — an empty side simply isn't scheduled.
+- The **weekdays** the schedule applies to.
+
+When the clock crosses a scheduled time on an active day, the queue starts or stops exactly as if you'd clicked the button; each edge fires at most once per day, and an edge that already passed earlier the same day is caught up when FluxDown launches. Queues with an active schedule show a small alarm-clock icon in the sidebar.
+
+### Task order within a queue
+
+The queue manager's **Task Order** tab lists the queue's tasks; move entries up or down to set the order in which they're started when the queue starts. Changes are persisted immediately.
+
+### Concurrency
+
+The global **Max Concurrent Downloads** cap (default 5) lives in **Settings → Download** and applies across all queues unless a queue overrides it with its own limit.
 
 ## Boost: Prioritize a Download
 

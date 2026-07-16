@@ -31,7 +31,7 @@ The demo server runs in demo mode (`FLUXDOWN_DEMO`, see [Server Setup](/docs/en/
 
 The main screen is a three-pane layout, the same structure as the desktop app:
 
-- **Sidebar** (left) — brand + global speed, file-type filters (All / Video / Audio / Documents / Images / Archives / Other) with live counts, named queues (create with the `+` button, delete from the hover trash icon — tasks in a deleted queue move to the default queue), connection status badge, and sign-out.
+- **Sidebar** (left) — brand + global speed, file-type filters (All / Video / Audio / Documents / Images / Archives / Other) with live counts, queues, connection status badge, and sign-out. The queue list shows the built-in **Main Queue** and **Download Later** queues plus your named queues (create with the `+` button; delete a named queue from the hover trash icon — its tasks move back to the Main Queue). Each queue has a running/stopped state dot and hover buttons to **start/stop** it (stopping pauses every task in it and keeps them from being auto-started; starting resumes them in queue order) and to edit its **daily schedule** (start/stop times `HH:MM` — fill either or both — plus the weekdays it applies to).
 - **Task list** (center) — top bar, batch management bar, status tabs, the virtualized task list, and a bottom status bar.
 - **Detail panel** (right) — opens when you select a task; five tabs: **General**, **Segments**, **Queue**, **Log**, **Advanced**.
 
@@ -77,11 +77,11 @@ The **New download** dialog accepts one or more URLs (one per line — HTTP, FTP
 | File name | Only editable for a single-URL submission; left blank it's inferred from the URL / `Content-Disposition`. |
 | Threads | Segment count: Auto (`segment_advisor` picks based on file size) or a fixed 1/2/4/8/16/32. |
 | Save directory | Defaults to the server's configured default save directory; browse the server's filesystem with the folder-picker button next to the field (this lists directories on the *server*, not your local machine). |
-| Queue | Assign to a named queue or the default queue. |
+| Queue | Assign to a named queue or the Main Queue. |
 | User-Agent | Global default or one of a few presets. |
 | Advanced (collapsible) | Cookies, Referrer, a per-task proxy URL, and a Checksum (`algo=hexhash`, verified after the download completes). |
 
-Submitting here creates tasks directly through the management API — there is no confirmation prompt, since you're already inside a trusted, authenticated session.
+Two buttons submit the form: **Start Download** creates the task(s) and starts them right away, while **Download Later** creates them in a paused state parked in the built-in **Download Later** queue (start them individually or start that queue when you're ready). Submitting here creates tasks directly through the management API — there is no confirmation prompt, since you're already inside a trusted, authenticated session.
 
 <!-- TODO(screenshot): new-download dialog with the advanced options panel expanded -->
 
